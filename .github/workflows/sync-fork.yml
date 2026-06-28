@@ -1,0 +1,35 @@
+name: Sync fork with upstream
+
+# Keeps this fork's `main` up to date with the upstream parent
+# (WhatDreamsCost/WhatDreamsCost-ComfyUI) automatically.
+#
+# It uses GitHub's native "Sync fork" API (merge-upstream) — the same thing the
+# "Sync fork" button calls. That means it:
+#   * tolerates the extra commit this very workflow adds to `main`
+#     (it performs a merge, never a force-push / history rewrite),
+#   * needs no personal access token — the built-in GITHUB_TOKEN is enough,
+#   * is conflict-proof here, since our only divergence from upstream is a new
+#     file that upstream never touches.
+#
+# Custom work stays on feature branches (e.g. `segment-number`) + patches, so it
+# is never affected by this sync.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch: {}     # allow manual runs from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/merge-upstream" \
+            -f branch=main
