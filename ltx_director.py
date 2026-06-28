@@ -991,7 +991,8 @@ class LTXDirector(io.ComfyNode):
         log.info(f"[LTXDirector] execute RECEIVED global_prompt: {repr(global_prompt)}")
 
         # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
-        guide_data = {"images": [], "insert_frames": [], "strengths": [], "frame_rate": frame_rate}
+        # "segment_numbers" carries the 0-based timeline position of each guide (see below).
+        guide_data = {"images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "frame_rate": frame_rate}
         derived_w, derived_h = custom_width, custom_height
         try:
             img_segs = [
@@ -1002,6 +1003,24 @@ class LTXDirector(io.ComfyNode):
                 and int(s.get("start", 0)) + int(s.get("length", 1)) > start_frame
             ]
             img_segs.sort(key=lambda s: s["start"])
+
+            # Map every main-track segment overlapping the generated window to its 0-based
+            # timeline position (left-to-right by start frame). Each guide is then tagged
+            # with the slot of the block it belongs to — not merely its rank among the
+            # image-bearing segments — so text-only blocks still occupy a position.
+            window_segs = sorted(
+                (
+                    s for s in tdata.get("segments", [])
+                    if int(s.get("start", 0)) < start_frame + duration_frames
+                    and int(s.get("start", 0)) + int(s.get("length", 1)) > start_frame
+                ),
+                key=lambda s: int(s.get("start", 0)),
+            )
+            seg_position = {}
+            for pos, s in enumerate(window_segs):
+                sid = s.get("id")
+                if sid is not None and sid not in seg_position:
+                    seg_position[sid] = pos
 
             strengths = []
             if guide_strength.strip():
@@ -1060,6 +1079,7 @@ class LTXDirector(io.ComfyNode):
                 guide_data["images"].append(tensor)
                 guide_data["insert_frames"].append(insert_frame)
                 guide_data["strengths"].append(float(strength))
+                guide_data["segment_numbers"].append(int(seg_position.get(seg.get("id"), idx)))
             
             # If no images were loaded from the timeline, create a dummy image at strength 0
             # to prevent artifacts in text-to-video mode.
@@ -1137,7 +1157,8 @@ class LTXDirector(io.ComfyNode):
                 guide_data["images"].append(tensor)
                 guide_data["insert_frames"].append(0)
                 guide_data["strengths"].append(0.0)
-                
+                guide_data["segment_numbers"].append(0)
+
                 derived_w = tensor.shape[2]
                 derived_h = tensor.shape[1]
 
@@ -1308,6 +1329,24 @@ class LTXDirector(io.ComfyNode):
                 motion_segments = tdata.get("motionSegments", [])
             else:
                 motion_segments = []
+
+            # 0-based timeline position for each motion segment (left-to-right by start
+            # frame), numbered independently of the image guide track.
+            window_motion = sorted(
+                (
+                    s for s in motion_segments
+                    if s.get("videoFile")
+                    and int(s.get("start", 0)) < start_frame + duration_frames
+                    and int(s.get("start", 0)) + int(s.get("length", 1)) > start_frame
+                ),
+                key=lambda s: int(s.get("start", 0)),
+            )
+            motion_position = {}
+            for pos, s in enumerate(window_motion):
+                sid = s.get("id")
+                if sid is not None and sid not in motion_position:
+                    motion_position[sid] = pos
+
             for seg in motion_segments:
                 seg_start = int(seg.get("start", 0))
                 length = int(seg.get("length", 1))
@@ -1328,6 +1367,7 @@ class LTXDirector(io.ComfyNode):
                 clean["start"] = new_start
                 clean["length"] = clipped_len
                 clean["trimStart"] = float(seg.get("trimStart", 0)) + offset
+                clean["segment_number"] = int(motion_position.get(seg.get("id"), len(motion_guide_data["segments"])))
                 motion_guide_data["segments"].append(clean)
         except Exception as e:
             log.warning("[LTXDirector] Could not build motion_guide_data: %s", e)
