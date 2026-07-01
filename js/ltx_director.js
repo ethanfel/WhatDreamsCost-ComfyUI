@@ -3155,6 +3155,27 @@ class TimelineEditor {
     deleteBtn.addEventListener("click", () => this.deleteSelectedSegment());
     this.deleteBtn = deleteBtn;
 
+    const cutMainBtn = document.createElement("button");
+    cutMainBtn.className = "pr-btn";
+    cutMainBtn.innerHTML = `✂ Cut Main`;
+    cutMainBtn.title = "Split the main-track segment under the playhead";
+    cutMainBtn.addEventListener("click", () => this.cutTrackAtPlayhead("image"));
+    this.cutMainBtn = cutMainBtn;
+
+    const cutVideoBtn = document.createElement("button");
+    cutVideoBtn.className = "pr-btn";
+    cutVideoBtn.innerHTML = `✂ Cut Video`;
+    cutVideoBtn.title = "Split the motion / IC-Video segment under the playhead";
+    cutVideoBtn.addEventListener("click", () => this.cutTrackAtPlayhead("motion"));
+    this.cutVideoBtn = cutVideoBtn;
+
+    const cutAudioBtn = document.createElement("button");
+    cutAudioBtn.className = "pr-btn";
+    cutAudioBtn.innerHTML = `✂ Cut Audio`;
+    cutAudioBtn.title = "Split the audio segment under the playhead";
+    cutAudioBtn.addEventListener("click", () => this.cutTrackAtPlayhead("audio"));
+    this.cutAudioBtn = cutAudioBtn;
+
     actionGroup.appendChild(this.fileInput);
     actionGroup.appendChild(this.audioFileInput);
     actionGroup.appendChild(this.motionFileInput);
@@ -3165,6 +3186,9 @@ class TimelineEditor {
     actionGroup.appendChild(uploadVideoBtn);
     actionGroup.appendChild(uploadMotionBtn);
     actionGroup.appendChild(deleteBtn);
+    actionGroup.appendChild(cutMainBtn);
+    actionGroup.appendChild(cutVideoBtn);
+    actionGroup.appendChild(cutAudioBtn);
 
     // Retake-mode-only delete button (shown next to Add Video when retakeMode is on)
     const deleteRetakeBtn = document.createElement("button");
@@ -6053,6 +6077,18 @@ class TimelineEditor {
     this.updateUIFromSelection();
     this.commitChanges();
     this.render();
+  }
+
+  // Quick razor: split whichever segment sits under the playhead on the given
+  // track ("image" = main, "motion" = IC-Video, "audio"). No-op if the playhead
+  // isn't inside a segment on that track. Reuses the linked-sibling-aware split.
+  cutTrackAtPlayhead(trackType) {
+    const arr = this.getSegmentArray(trackType);
+    const frame = Math.round(this.currentFrame);
+    const seg = (arr || []).find(s => frame > s.start && frame < s.start + s.length);
+    if (!seg) return false;
+    this.splitSegmentAtPlayhead(seg, trackType);
+    return true;
   }
 
   formatTime(frames, dropSuffix = false) {
