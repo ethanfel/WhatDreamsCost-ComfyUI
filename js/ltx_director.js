@@ -132,8 +132,18 @@ const STYLES = `
     cursor: pointer;
   }
   .pr-tab-add:hover { background: #283142; color: #fff; }
-  .pr-tab-dual {
+  .pr-tab-import {
     margin-left: auto;
+    background: #1a1a1a;
+    color: #cccccc;
+    border: 1px solid #111;
+    border-radius: 6px 6px 0 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .pr-tab-import:hover { background: #283142; color: #fff; }
+  .pr-tab-dual {
     background: #1a1a1a;
     color: #cccccc;
     border: 1px solid #111;
@@ -144,6 +154,61 @@ const STYLES = `
   }
   .pr-tab-dual:hover { background: #283142; color: #fff; }
   .pr-tab-dual.active { background: #2f3b52; color: #fff; border-color: #3b4b66; }
+  .pr-import-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }
+  .pr-import-box {
+    width: min(680px, 90vw);
+    background: #1c1c1c;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 14px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  }
+  .pr-import-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: #e0e0e0;
+    margin-bottom: 8px;
+  }
+  .pr-import-textarea {
+    width: 100%;
+    height: 240px;
+    box-sizing: border-box;
+    resize: vertical;
+    background: #111;
+    color: #ddd;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 12px;
+    white-space: pre;
+  }
+  .pr-import-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .pr-import-btn {
+    background: #262626;
+    color: #e0e0e0;
+    border: 1px solid #3a3a3a;
+    border-radius: 5px;
+    padding: 5px 14px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .pr-import-btn:hover { background: #333; }
+  .pr-import-btn.primary { background: #2f3b52; border-color: #3b4b66; color: #fff; }
+  .pr-import-btn.primary:hover { background: #3a4a66; }
   .pr-result-lane {
     display: none;
     margin-top: 4px;
@@ -1866,6 +1931,13 @@ class TimelineEditor {
     addBtn.onclick = () => this.addTab();
     this.tabBar.appendChild(addBtn);
 
+    const importBtn = document.createElement("button");
+    importBtn.className = "pr-tab-import";
+    importBtn.textContent = "⬇ JSON";
+    importBtn.title = "Import a beats / shot-list JSON as a new timeline";
+    importBtn.onclick = () => this.showImportDialog();
+    this.tabBar.appendChild(importBtn);
+
     const dualBtn = document.createElement("button");
     dualBtn.className = "pr-tab-dual" + (this.dualViewEnabled ? " active" : "");
     dualBtn.textContent = "⇅ Dual";
@@ -2291,6 +2363,154 @@ class TimelineEditor {
     this.commitChanges();
     this.updateUIFromSelection();
     this.render();             // redraws the main editor + the Result lane
+  }
+
+  // ============================================================
+  // Import a "beats" / shot-list JSON as a new timeline tab.
+  //   { fps, global_prompt, negative_prompt, beats: [ { prompt|camera+delta,
+  //     frames|duration_s }, ... ] }
+  // Tolerant: `beats` may also be named `segments` or `shots`.
+  // ============================================================
+
+  _parseBeats(root) {
+    if (!root || typeof root !== "object") return null;
+    const beats = Array.isArray(root.beats) ? root.beats
+      : Array.isArray(root.segments) ? root.segments
+      : Array.isArray(root.shots) ? root.shots : null;
+    if (!beats || !beats.length) return null;
+
+    let fps = Number(root.fps);
+    if (!(fps > 0)) fps = this.getFrameRate();
+    fps = Math.round(fps);
+
+    const segs = [];
+    for (const b of beats) {
+      if (!b || typeof b !== "object") continue;
+      let len = 0;
+      if (Number(b.frames) > 0) len = Math.round(Number(b.frames));
+      else if (Number(b.duration_s) > 0) len = Math.round(Number(b.duration_s) * fps);
+      if (!(len > 0)) len = fps;
+      let prompt = (typeof b.prompt === "string" && b.prompt.trim())
+        ? b.prompt.trim()
+        : [b.camera, b.delta].filter(x => typeof x === "string" && x.trim()).map(x => x.trim()).join(", ");
+      segs.push({ prompt, length: Math.max(1, len) });
+    }
+    if (!segs.length) return null;
+
+    return {
+      fps,
+      globalPrompt: (typeof root.global_prompt === "string") ? root.global_prompt : "",
+      negativePrompt: (typeof root.negative_prompt === "string") ? root.negative_prompt : "",
+      segments: segs,
+      total: segs.reduce((a, s) => a + s.length, 0),
+    };
+  }
+
+  importBeatsIntoNewTab(root, name) {
+    const parsed = this._parseBeats(root);
+    if (!parsed) {
+      window.alert('Could not read a "beats" array from that JSON.');
+      return false;
+    }
+    this._captureActiveLength();
+    this.commitChanges(); // persist the current active tab first
+
+    const tab = parseInitial("{}");
+    tab.name = name || "Imported";
+    tab.frameRate = parsed.fps;
+    tab.global_prompt = parsed.globalPrompt || "";
+    if (parsed.negativePrompt) tab.negative_prompt = parsed.negativePrompt; // stashed; not wired to output
+    tab.normalStartFrame = 0;
+    tab.normalDurationFrames = Math.max(1, parsed.total);
+    tab._tabId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+
+    let cursor = 0;
+    tab.segments = parsed.segments.map(s => {
+      const seg = {
+        id: Date.now().toString() + Math.random().toString(36).substr(2, 6),
+        start: cursor, length: s.length, prompt: s.prompt, type: "text",
+      };
+      cursor += s.length;
+      return seg;
+    });
+
+    this.tabs.push(tab);
+    this.switchToTab(this.tabs.length - 1); // makes it active, restores its fps/length, renders
+    this.renderTabBar();
+    return true;
+  }
+
+  showImportDialog() {
+    if (this._importOverlay) { try { this._importOverlay.remove(); } catch (_) {} this._importOverlay = null; }
+
+    const overlay = document.createElement("div");
+    overlay.className = "pr-import-overlay";
+    const box = document.createElement("div");
+    box.className = "pr-import-box";
+
+    const title = document.createElement("div");
+    title.className = "pr-import-title";
+    title.textContent = "Import beats JSON as a new timeline";
+    box.appendChild(title);
+
+    const ta = document.createElement("textarea");
+    ta.className = "pr-import-textarea";
+    ta.placeholder = 'Paste JSON with a "beats" array, e.g.\n{ "fps": 24, "global_prompt": "...", "beats": [ { "prompt": "...", "frames": 121 }, ... ] }';
+    box.appendChild(ta);
+
+    const row = document.createElement("div");
+    row.className = "pr-import-row";
+
+    const loadBtn = document.createElement("button");
+    loadBtn.className = "pr-import-btn";
+    loadBtn.textContent = "Load .json…";
+    loadBtn.onclick = () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json,application/json";
+      input.onchange = () => {
+        const f = input.files && input.files[0];
+        if (!f) return;
+        const reader = new FileReader();
+        reader.onload = () => { ta.value = String(reader.result || ""); };
+        reader.readAsText(f);
+      };
+      input.click();
+    };
+    row.appendChild(loadBtn);
+
+    const spacer = document.createElement("span");
+    spacer.style.flex = "1";
+    row.appendChild(spacer);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "pr-import-btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.onclick = () => { overlay.remove(); this._importOverlay = null; };
+    row.appendChild(cancelBtn);
+
+    const okBtn = document.createElement("button");
+    okBtn.className = "pr-import-btn primary";
+    okBtn.textContent = "Import";
+    okBtn.onclick = () => {
+      let root;
+      try { root = JSON.parse(ta.value); }
+      catch (e) { window.alert("Invalid JSON: " + e.message); return; }
+      if (this.importBeatsIntoNewTab(root, "Imported")) {
+        overlay.remove();
+        this._importOverlay = null;
+      }
+    };
+    row.appendChild(okBtn);
+
+    box.appendChild(row);
+    overlay.appendChild(box);
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) { overlay.remove(); this._importOverlay = null; }
+    });
+    document.body.appendChild(overlay);
+    this._importOverlay = overlay;
+    ta.focus();
   }
 
   getSnappedPlayhead(mouseFrameX, logicalWidth) {
