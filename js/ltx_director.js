@@ -132,6 +132,65 @@ const STYLES = `
     cursor: pointer;
   }
   .pr-tab-add:hover { background: #283142; color: #fff; }
+  .pr-tab-dual {
+    margin-left: auto;
+    background: #1a1a1a;
+    color: #cccccc;
+    border: 1px solid #111;
+    border-radius: 6px 6px 0 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .pr-tab-dual:hover { background: #283142; color: #fff; }
+  .pr-tab-dual.active { background: #2f3b52; color: #fff; border-color: #3b4b66; }
+  .pr-result-lane {
+    display: none;
+    margin-top: 4px;
+    border: 1px solid #111;
+    border-radius: 6px;
+    background: #161616;
+    padding: 4px 6px 6px 6px;
+  }
+  .pr-result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .pr-result-title {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: #9aabc0;
+    font-weight: bold;
+  }
+  .pr-result-picker {
+    background: #222;
+    color: #ddd;
+    border: 1px solid #333;
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 1px 4px;
+  }
+  .pr-result-swap {
+    background: #2f3b52;
+    color: #fff;
+    border: 1px solid #3b4b66;
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 2px 12px;
+    cursor: pointer;
+  }
+  .pr-result-swap:hover { background: #3a4a66; }
+  .pr-result-hint { font-size: 10px; color: #666; }
+  .pr-result-canvas {
+    display: block;
+    width: 100%;
+    height: 48px;
+    border-radius: 4px;
+    background: #141414;
+    cursor: crosshair;
+  }
   .pr-toolbar {
     display: flex;
     justify-content: space-between;
@@ -832,7 +891,17 @@ function parseTabsRoot(jsonStr) {
     tl._tabId = (blob && blob._tabId) ? blob._tabId : (Date.now().toString() + i.toString() + Math.random().toString(36).substr(2, 4));
     return tl;
   });
-  return { tabs, activeTab };
+  // Drop a Result reference that no longer matches any tab (e.g. tab was deleted).
+  const validIds = new Set(tabs.map(t => t._tabId));
+  let resultTabId = (root && root.resultTabId) || null;
+  if (resultTabId && !validIds.has(resultTabId)) resultTabId = null;
+
+  return {
+    tabs,
+    activeTab,
+    dualView: !!(root && root.dualView),
+    resultTabId,
+  };
 }
 
 class TimelineEditor {
@@ -925,6 +994,10 @@ class TimelineEditor {
     this.tabs = _tabRoot.tabs;
     this.activeTabIndex = _tabRoot.activeTab;
     this.timeline = this.tabs[this.activeTabIndex];
+    // Dual-lane (Source vs Result) view state.
+    this.dualViewEnabled = _tabRoot.dualView === true;
+    this.resultTabId = _tabRoot.resultTabId || null;
+    this.resultRange = null; // { startFrame, endFrame } selected on the Result lane
     this.retakeMode = this.timeline.retakeMode === true;
     if (this.retakeMode) {
       if (this.timeline.retake_global_prompt) {
@@ -1792,6 +1865,13 @@ class TimelineEditor {
     addBtn.title = "New timeline";
     addBtn.onclick = () => this.addTab();
     this.tabBar.appendChild(addBtn);
+
+    const dualBtn = document.createElement("button");
+    dualBtn.className = "pr-tab-dual" + (this.dualViewEnabled ? " active" : "");
+    dualBtn.textContent = "⇅ Dual";
+    dualBtn.title = "Toggle the Result lane (compare/swap against another timeline)";
+    dualBtn.onclick = () => this.toggleDualView();
+    this.tabBar.appendChild(dualBtn);
   }
 
   _nextTabName() {
@@ -1929,7 +2009,13 @@ class TimelineEditor {
     if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
 
     const wasActive = (i === this.activeTabIndex);
+    const deletedTabId = this.tabs[i]._tabId;
     this.tabs.splice(i, 1);
+    // Drop a dangling Result reference if the deleted tab was the Result lane.
+    if (this.resultTabId && this.resultTabId === deletedTabId) {
+      this.resultTabId = null;
+      this.resultRange = null;
+    }
     if (wasActive) {
       this.activeTabIndex = Math.min(i, this.tabs.length - 1);
       this.timeline = this.tabs[this.activeTabIndex];
@@ -1939,6 +2025,7 @@ class TimelineEditor {
       this.commitChanges();
     }
     this.renderTabBar();
+    if (this.renderResultLane) this.renderResultLane();
   }
 
   // Copy a single segment into another tab's matching track (independent copy).
@@ -1954,6 +2041,256 @@ class TimelineEditor {
     const newSeg = { ...rest, id: Date.now().toString() + Math.random().toString(36).substr(2, 5) };
     target[prop].push(newSeg);
     this.commitChanges();
+  }
+
+  // ============================================================
+  // Dual lane — compare the active (Source) timeline against a
+  // Result timeline shown as a read-only strip, and swap sections.
+  // ============================================================
+
+  _resultTabIndex() {
+    if (!this.resultTabId || !Array.isArray(this.tabs)) return -1;
+    return this.tabs.findIndex(t => t._tabId === this.resultTabId);
+  }
+
+  // Total frames used for the Result strip's frame->x mapping. Matches the main
+  // timeline's extent so the two lanes line up on the time axis (at zoom 1).
+  _dualTotalFrames() {
+    return Math.max(24, this.getVisualDurationFrames());
+  }
+
+  // Ensure a distinct Result timeline exists to compare against; create one if the
+  // node only has a single tab.
+  _dualEnsureResultTab() {
+    let idx = this._resultTabIndex();
+    if (idx >= 0 && idx !== this.activeTabIndex) return idx;
+    idx = this.tabs.findIndex((t, i) => i !== this.activeTabIndex);
+    if (idx < 0) {
+      const base = parseInitial("{}");
+      base.name = "Result";
+      base.frameRate = this.getFrameRate();
+      base.normalStartFrame = 0;
+      base.normalDurationFrames = this.getDurationFrames();
+      base._tabId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+      this.tabs.push(base);
+      idx = this.tabs.length - 1;
+      if (this.renderTabBar) this.renderTabBar();
+    }
+    this.resultTabId = this.tabs[idx]._tabId;
+    return idx;
+  }
+
+  toggleDualView() {
+    this.dualViewEnabled = !this.dualViewEnabled;
+    if (this.dualViewEnabled) this._dualEnsureResultTab();
+    if (this.renderTabBar) this.renderTabBar();
+    this.renderResultLane();
+    // The lane was just unhidden; its canvas width isn't laid out yet on this frame,
+    // so redraw once more after layout settles to get the correct width.
+    if (this.dualViewEnabled && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => this.renderResultLane());
+    }
+    this.commitChanges();
+  }
+
+  setResultTab(tabId) {
+    this.resultTabId = tabId || null;
+    this.resultRange = null;
+    this.renderResultLane();
+    this.commitChanges();
+  }
+
+  buildResultLane() {
+    const el = document.createElement("div");
+    el.className = "pr-result-lane";
+    this.resultLaneEl = el;
+
+    const header = document.createElement("div");
+    header.className = "pr-result-header";
+
+    const title = document.createElement("span");
+    title.className = "pr-result-title";
+    title.textContent = "RESULT";
+    header.appendChild(title);
+
+    const picker = document.createElement("select");
+    picker.className = "pr-result-picker";
+    picker.title = "Which timeline to compare/swap against";
+    picker.onchange = () => this.setResultTab(picker.value);
+    this.resultPicker = picker;
+    header.appendChild(picker);
+
+    const swapBtn = document.createElement("button");
+    swapBtn.className = "pr-result-swap";
+    swapBtn.innerHTML = "Swap &#8645;";
+    swapBtn.title = "Exchange the selected range between Source and Result (moves if one side is empty)";
+    swapBtn.onclick = () => this.swapRangeWithResult();
+    header.appendChild(swapBtn);
+
+    const hint = document.createElement("span");
+    hint.className = "pr-result-hint";
+    hint.textContent = "drag on the lane to select a range";
+    header.appendChild(hint);
+
+    el.appendChild(header);
+
+    const canvas = document.createElement("canvas");
+    canvas.className = "pr-result-canvas";
+    this.resultCanvas = canvas;
+    el.appendChild(canvas);
+
+    // Isolated drag-to-select a frame range on the Result lane.
+    const toFrame = (clientX) => {
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width || 1;
+      const total = this._dualTotalFrames();
+      const f = Math.round(((clientX - rect.left) / w) * total);
+      return Math.max(0, Math.min(total, f));
+    };
+    let dragging = false, anchor = 0;
+    canvas.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      anchor = toFrame(e.clientX);
+      this.resultRange = { startFrame: anchor, endFrame: anchor };
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      this.renderResultLane();
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const f = toFrame(e.clientX);
+      this.resultRange = { startFrame: Math.min(anchor, f), endFrame: Math.max(anchor, f) };
+      this.renderResultLane();
+    });
+    const endDrag = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
+
+    return el;
+  }
+
+  _resultLaneRefreshPicker() {
+    if (!this.resultPicker) return;
+    const sel = this.resultTabId;
+    // Only rebuild the <select> when the tab set / selection actually changed, so a
+    // frequent render() doesn't wipe an open dropdown or waste work.
+    const sig = (this.tabs || []).map((t, i) => `${i === this.activeTabIndex ? "*" : ""}${t._tabId}:${t.name || ""}`).join("|") + `#${sel || ""}`;
+    if (sig === this._resultPickerSig) return;
+    this._resultPickerSig = sig;
+    this.resultPicker.innerHTML = "";
+    (this.tabs || []).forEach((t, i) => {
+      if (i === this.activeTabIndex) return; // a timeline can't be compared with itself
+      const opt = document.createElement("option");
+      opt.value = t._tabId;
+      opt.textContent = t.name || `Timeline ${i + 1}`;
+      if (t._tabId === sel) opt.selected = true;
+      this.resultPicker.appendChild(opt);
+    });
+  }
+
+  renderResultLane() {
+    const el = this.resultLaneEl;
+    if (!el) return;
+    if (!this.dualViewEnabled) { el.style.display = "none"; return; }
+    el.style.display = "block";
+
+    this._resultLaneRefreshPicker();
+
+    const canvas = this.resultCanvas;
+    if (!canvas) return;
+    let ridx = this._resultTabIndex();
+    if (ridx === this.activeTabIndex) ridx = -1;
+
+    const cssW = Math.max(1, canvas.clientWidth || el.clientWidth || 600);
+    const ROWS = 3, ROWH = 16, H = ROWS * ROWH;
+    if (canvas.width !== cssW) canvas.width = cssW;
+    if (canvas.height !== H) canvas.height = H;
+
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, cssW, H);
+    ctx.fillStyle = "#141414";
+    ctx.fillRect(0, 0, cssW, H);
+
+    const total = this._dualTotalFrames();
+    const res = (ridx >= 0) ? this.tabs[ridx] : null;
+    const trackColors = { segments: "#2f6db0", motionSegments: "#7d4fb0", audioSegments: "#2f9e6b" };
+    const props = ["segments", "motionSegments", "audioSegments"];
+
+    if (res) {
+      props.forEach((prop, row) => {
+        const y = row * ROWH;
+        (res[prop] || []).forEach(s => {
+          const x = (s.start / total) * cssW;
+          const w = Math.max(2, (s.length / total) * cssW);
+          ctx.fillStyle = trackColors[prop];
+          ctx.fillRect(x, y + 1, w, ROWH - 2);
+          ctx.strokeStyle = "rgba(0,0,0,0.5)";
+          ctx.strokeRect(x + 0.5, y + 1.5, w - 1, ROWH - 3);
+          const label = (s.fileName || (s.imageFile ? s.imageFile.split("/").pop() : "") || s.prompt || "").toString();
+          if (label && w > 24) {
+            ctx.save();
+            ctx.beginPath(); ctx.rect(x + 2, y, w - 4, ROWH); ctx.clip();
+            ctx.fillStyle = "rgba(255,255,255,0.85)";
+            ctx.font = "9px sans-serif";
+            ctx.fillText(label, x + 3, y + ROWH - 5);
+            ctx.restore();
+          }
+        });
+      });
+    } else {
+      ctx.fillStyle = "#666";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("No Result timeline selected", 8, H / 2 + 3);
+    }
+
+    const r = this.resultRange;
+    if (r && r.endFrame > r.startFrame) {
+      const x0 = (r.startFrame / total) * cssW;
+      const x1 = (r.endFrame / total) * cssW;
+      ctx.fillStyle = "rgba(80,140,240,0.22)";
+      ctx.fillRect(x0, 0, x1 - x0, H);
+      ctx.strokeStyle = "rgba(120,170,255,0.9)";
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x0 + 0.5, 0.5, (x1 - x0) - 1, H - 1);
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Exchange every segment overlapping the selected range between the Source
+  // (active) tab and the Result tab. If one side is empty in that range the
+  // exchange degenerates to a move.
+  swapRangeWithResult() {
+    const ridx = this._resultTabIndex();
+    if (ridx < 0 || ridx === this.activeTabIndex) { window.alert("Pick a Result timeline first."); return; }
+    const r = this.resultRange;
+    if (!r || r.endFrame <= r.startFrame) { window.alert("Drag on the Result lane to select a range first."); return; }
+
+    const src = this.timeline;
+    const res = this.tabs[ridx];
+    const a = r.startFrame, b = r.endFrame;
+    const inRange = (s) => (s.start < b && (s.start + s.length) > a);
+    const props = ["segments", "motionSegments", "audioSegments"];
+
+    props.forEach(prop => {
+      const srcArr = Array.isArray(src[prop]) ? src[prop] : (src[prop] = []);
+      const resArr = Array.isArray(res[prop]) ? res[prop] : (res[prop] = []);
+      const srcIn = srcArr.filter(inRange);
+      const resIn = resArr.filter(inRange);
+      src[prop] = srcArr.filter(s => !inRange(s)).concat(resIn);
+      res[prop] = resArr.filter(s => !inRange(s)).concat(srcIn);
+      src[prop].sort((x, y) => x.start - y.start);
+      res[prop].sort((x, y) => x.start - y.start);
+    });
+
+    this.selectedIndex = -1;
+    this.selectedSegmentIds = [];
+    this.loadMedia();          // rebuild media for the now-updated Source tab
+    this.commitChanges();
+    this.updateUIFromSelection();
+    this.render();             // redraws the main editor + the Result lane
   }
 
   getSnappedPlayhead(mouseFrameX, logicalWidth) {
@@ -4068,6 +4405,7 @@ class TimelineEditor {
     this.wrapper.appendChild(this.buildTabBar());
     this.wrapper.appendChild(toolbar);
     this.wrapper.appendChild(this.layoutContainer);
+    this.wrapper.appendChild(this.buildResultLane());
 
 
     const controlsGroup = document.createElement("div");
@@ -7255,6 +7593,7 @@ class TimelineEditor {
     }
 
     this.updatePlayerUI();
+    this.renderResultLane();
   }
 
 
@@ -9205,6 +9544,8 @@ class TimelineEditor {
         (i === this.activeTabIndex) ? activeBlob : this._serializeTabBlob(t)
       );
       toSave.activeTab = this.activeTabIndex;
+      toSave.dualView = !!this.dualViewEnabled;
+      toSave.resultTabId = this.resultTabId || null;
     }
 
     const jsonStr = JSON.stringify(toSave);
@@ -10493,7 +10834,11 @@ class TimelineEditor {
       this.tabs = _loadedTabs.tabs;
       this.activeTabIndex = _loadedTabs.activeTab;
       this.timeline = this.tabs[this.activeTabIndex];
+      this.dualViewEnabled = _loadedTabs.dualView === true;
+      this.resultTabId = _loadedTabs.resultTabId || null;
+      this.resultRange = null;
       if (this.renderTabBar) this.renderTabBar();
+      if (this.renderResultLane) this.renderResultLane();
       this.mainTrackEnabled = this.timeline.mainTrackEnabled !== false;
       this.audioTrackEnabled = this.timeline.audioTrackEnabled !== false;
       this.motionTrackEnabled = this.timeline.motionTrackEnabled !== false;
@@ -11857,7 +12202,10 @@ app.registerExtension({
             this._timelineEditor.tabs = _root.tabs;
             this._timelineEditor.activeTabIndex = _root.activeTab;
             this._timelineEditor.timeline = _root.tabs[_root.activeTab];
+            this._timelineEditor.dualViewEnabled = _root.dualView === true;
+            this._timelineEditor.resultTabId = _root.resultTabId || null;
             if (this._timelineEditor.renderTabBar) this._timelineEditor.renderTabBar();
+            if (this._timelineEditor.renderResultLane) this._timelineEditor.renderResultLane();
             const tl = this._timelineEditor.timeline;
             console.log("[LTXDirector debug] setTimeout: parsed timeline:", JSON.stringify(tl));
 
