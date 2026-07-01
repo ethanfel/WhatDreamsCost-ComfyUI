@@ -836,6 +836,76 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
     return patched, conditioning
 
 
+def _parse_beats_json(beats_json, default_fps=24):
+    """Parse a 'beats' / shot-list JSON into prompt-relay inputs.
+
+    Accepts {fps, global_prompt, negative_prompt, beats:[{prompt|camera+delta,
+    frames|duration_s}, ...]} (beats may also be named 'segments' or 'shots').
+    Returns a dict with local_prompts (" | "-joined), segment_lengths
+    (","-joined), global_prompt and fps, or None if nothing usable was found.
+    """
+    try:
+        root = json.loads(beats_json)
+    except Exception as e:
+        log.warning("[LTXDirector] beats_json parse error: %s", e)
+        return None
+    if not isinstance(root, dict):
+        return None
+
+    beats = root.get("beats")
+    if not isinstance(beats, list):
+        beats = root.get("segments")
+    if not isinstance(beats, list):
+        beats = root.get("shots")
+    if not isinstance(beats, list) or not beats:
+        return None
+
+    try:
+        fps = int(round(float(root.get("fps", default_fps))))
+    except Exception:
+        fps = default_fps
+    if fps <= 0:
+        fps = default_fps
+
+    prompts, lengths = [], []
+    for b in beats:
+        if not isinstance(b, dict):
+            continue
+        length = 0
+        try:
+            if b.get("frames") is not None and float(b["frames"]) > 0:
+                length = int(round(float(b["frames"])))
+            elif b.get("duration_s") is not None and float(b["duration_s"]) > 0:
+                length = int(round(float(b["duration_s"]) * fps))
+        except Exception:
+            length = 0
+        if length <= 0:
+            length = fps
+
+        prompt = ""
+        if isinstance(b.get("prompt"), str) and b["prompt"].strip():
+            prompt = b["prompt"].strip()
+        else:
+            parts = [b.get("camera"), b.get("delta")]
+            prompt = ", ".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+
+        prompts.append(prompt)
+        lengths.append(max(1, length))
+
+    if not prompts:
+        return None
+
+    gp = root.get("global_prompt")
+    gp = gp.strip() if isinstance(gp, str) else ""
+    return {
+        "global_prompt": gp,
+        "local_prompts": " | ".join(prompts),
+        "segment_lengths": ",".join(str(x) for x in lengths),
+        "fps": fps,
+        "total_frames": sum(lengths),
+    }
+
+
 class LTXDirector(io.ComfyNode):
     """WYSIWYG timeline variant — segments and lengths come from a visual editor in the node UI."""
 
@@ -950,6 +1020,15 @@ class LTXDirector(io.ComfyNode):
                     "override_audio", default=False, optional=True,
                     tooltip="Use the audio from the IC-LoRA video instead of using the audio track.",
                 ),
+                io.String.Input(
+                    "beats_json", multiline=True, default="", optional=True, force_input=True,
+                    tooltip=(
+                        "Optional. A 'beats'/shot-list JSON (fps, global_prompt, beats:[{prompt, "
+                        "frames|duration_s}, ...]). When connected, it drives a pure text prompt-relay "
+                        "for this run, overriding the visual timeline. negative_prompt is ignored here "
+                        "(set it downstream at the guide/sampler)."
+                    ),
+                ),
             ],
             outputs=[
                 io.Model.Output(display_name="model"),
@@ -969,7 +1048,8 @@ class LTXDirector(io.ComfyNode):
                 frame_rate=24, display_mode="seconds",
                 custom_width=768, custom_height=512, resize_method="maintain aspect ratio",
                 divisible_by=32, img_compression=0, audio_vae=None, optional_latent=None,
-                use_custom_audio=False, inpaint_audio=True, use_custom_motion=True, override_audio=False) -> io.NodeOutput:
+                use_custom_audio=False, inpaint_audio=True, use_custom_motion=True, override_audio=False,
+                beats_json="") -> io.NodeOutput:
 
         # Parse timeline data
         try:
@@ -989,6 +1069,26 @@ class LTXDirector(io.ComfyNode):
                 global_prompt = tdata.get("global_prompt", "")
 
         log.info(f"[LTXDirector] execute RECEIVED global_prompt: {repr(global_prompt)}")
+
+        # --- Optional 'beats' JSON override (node input) ---
+        # When connected, the beats drive a pure text prompt-relay for this run:
+        # override prompts/lengths/fps and ignore the visual-timeline guides.
+        if beats_json and beats_json.strip():
+            beats = _parse_beats_json(beats_json, default_fps=int(frame_rate) if frame_rate else 24)
+            if beats:
+                if not global_prompt:
+                    global_prompt = beats["global_prompt"]
+                local_prompts = beats["local_prompts"]
+                segment_lengths = beats["segment_lengths"]
+                frame_rate = beats["fps"]
+                duration_frames = max(1, beats["total_frames"])
+                # Text-only: drop visual-timeline guides/motion for this run.
+                timeline_data = "{}"
+                tdata = {}
+                log.info(
+                    "[LTXDirector] beats_json override: %d segments, %d frames @ %d fps",
+                    len(beats["segment_lengths"].split(",")), duration_frames, frame_rate,
+                )
 
         # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
         # "segment_numbers" carries the 0-based timeline position of each guide (see below).
