@@ -76,6 +76,62 @@ const STYLES = `
     background: rgba(255, 255, 255, 0.05);
     border-radius: 6px;
   }
+  .pr-tabbar {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    flex-wrap: wrap;
+    padding: 2px 0 0 0;
+    margin-bottom: 2px;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  .pr-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 200px;
+    background: #1a1a1a;
+    color: #b0b0b0;
+    border: 1px solid #111;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .pr-tab:hover { background: #242424; color: #e0e0e0; }
+  .pr-tab.active {
+    background: #2f3b52;
+    color: #ffffff;
+    border-color: #3b4b66;
+  }
+  .pr-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .pr-tab-close {
+    font-size: 13px;
+    line-height: 1;
+    color: #888;
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+  .pr-tab-close:hover { color: #fff; background: #cc4444; }
+  .pr-tab-add {
+    background: #1a1a1a;
+    color: #cccccc;
+    border: 1px solid #111;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    padding: 4px 9px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .pr-tab-add:hover { background: #283142; color: #fff; }
   .pr-toolbar {
     display: flex;
     justify-content: space-between;
@@ -749,6 +805,36 @@ function parseInitial(jsonStr) {
   return parsed;
 }
 
+// Parse the timeline_data widget into { tabs: [timelineObj, ...], activeTab }.
+// Backward compatible: a legacy single-timeline blob (no `tabs` key) becomes one tab,
+// and the active tab is always mirrored to the top-level keys on save so the Python
+// backend keeps reading a single timeline unchanged.
+function parseTabsRoot(jsonStr) {
+  let root = null;
+  try { root = jsonStr ? JSON.parse(jsonStr) : null; } catch (e) { root = null; }
+
+  let tabBlobs;
+  let activeTab = 0;
+  if (root && Array.isArray(root.tabs) && root.tabs.length > 0) {
+    tabBlobs = root.tabs;
+    activeTab = parseInt(root.activeTab, 10);
+    if (!Number.isFinite(activeTab)) activeTab = 0;
+    activeTab = Math.min(Math.max(0, activeTab), tabBlobs.length - 1);
+  } else {
+    tabBlobs = [root || {}];
+    activeTab = 0;
+  }
+
+  const tabs = tabBlobs.map((blob, i) => {
+    const tl = parseInitial(JSON.stringify(blob || {}));
+    tl.name = (blob && typeof blob.name === "string" && blob.name.trim()) ? blob.name.trim() : `Timeline ${i + 1}`;
+    tl.frameRate = (blob && blob.frameRate) ? blob.frameRate : undefined;
+    tl._tabId = (blob && blob._tabId) ? blob._tabId : (Date.now().toString() + i.toString() + Math.random().toString(36).substr(2, 4));
+    return tl;
+  });
+  return { tabs, activeTab };
+}
+
 class TimelineEditor {
   constructor(node, container, domWidget) {
     this.node = node;
@@ -834,7 +920,11 @@ class TimelineEditor {
     this._prevStartSeconds = this.startSecondsWidget ? this.startSecondsWidget.value : 0;
 
     console.log("[LTXDirector debug] Constructor: timelineDataWidget value:", this.timelineDataWidget?.value);
-    this.timeline = parseInitial(this.timelineDataWidget?.value);
+    // Multi-tab: parse all timelines and make the active one the live `this.timeline`.
+    const _tabRoot = parseTabsRoot(this.timelineDataWidget?.value);
+    this.tabs = _tabRoot.tabs;
+    this.activeTabIndex = _tabRoot.activeTab;
+    this.timeline = this.tabs[this.activeTabIndex];
     this.retakeMode = this.timeline.retakeMode === true;
     if (this.retakeMode) {
       if (this.timeline.retake_global_prompt) {
@@ -1614,6 +1704,256 @@ class TimelineEditor {
     if (trackType === "motion") return this.timeline.motionSegments;
     if (trackType === "audio") return this.timeline.audioSegments;
     return this.timeline.segments;
+  }
+
+  // ============================================================
+  // Timeline tabs — multiple independent timelines, one active.
+  // ============================================================
+
+  // Canonical track ("image" | "audio" | "motion") -> the array property on a tab.
+  _tabTrackProp(canon) {
+    if (canon === "motion") return "motionSegments";
+    if (canon === "audio") return "audioSegments";
+    return "segments";
+  }
+
+  // Produce a clean, serializable blob for a (non-active) tab timeline object.
+  _serializeTabBlob(tl) {
+    const clean = (arr) => (arr || []).map(s => {
+      const { imgObj, videoEl, _isSeeking, thumbnails, _extractingThumbs, _sSecs, _lSecs, _tSecs, _dSecs, _uploading, _decoding, _blobUrl, _audioBuffer, ...rest } = s;
+      return rest;
+    });
+    return {
+      name: tl.name,
+      frameRate: tl.frameRate,
+      _tabId: tl._tabId,
+      global_prompt: tl.global_prompt || "",
+      retake_global_prompt: tl.retake_global_prompt || "",
+      mainTrackEnabled: tl.mainTrackEnabled !== false,
+      audioTrackEnabled: tl.audioTrackEnabled !== false,
+      motionTrackEnabled: tl.motionTrackEnabled !== false,
+      propHeight: tl.propHeight,
+      globalPropHeight: tl.globalPropHeight,
+      showFilenames: tl.showFilenames,
+      overrideAudio: tl.overrideAudio,
+      inpaint_audio: tl.inpaint_audio,
+      retakeMode: tl.retakeMode === true,
+      retakeStart: tl.retakeStart,
+      retakeLength: tl.retakeLength,
+      retakePrompt: tl.retakePrompt,
+      retakeStrength: tl.retakeStrength,
+      retakeVideo: tl.retakeVideo || null,
+      normalStartFrame: tl.normalStartFrame,
+      normalDurationFrames: tl.normalDurationFrames,
+      segments: clean(tl.segments),
+      motionSegments: clean(tl.motionSegments),
+      audioSegments: clean(tl.audioSegments),
+    };
+  }
+
+  buildTabBar() {
+    this.tabBar = document.createElement("div");
+    this.tabBar.className = "pr-tabbar";
+    this.renderTabBar();
+    return this.tabBar;
+  }
+
+  renderTabBar() {
+    if (!this.tabBar) return;
+    this.tabBar.innerHTML = "";
+    const tabs = this.tabs || [];
+    tabs.forEach((tab, i) => {
+      const btn = document.createElement("button");
+      btn.className = "pr-tab" + (i === this.activeTabIndex ? " active" : "");
+      btn.title = "Click to switch • double-click to rename";
+
+      const label = document.createElement("span");
+      label.className = "pr-tab-label";
+      label.textContent = tab.name || `Timeline ${i + 1}`;
+      btn.appendChild(label);
+
+      btn.onclick = () => { if (i !== this.activeTabIndex) this.switchToTab(i); };
+      btn.ondblclick = (e) => { e.preventDefault(); e.stopPropagation(); this.promptRenameTab(i); };
+
+      if (tabs.length > 1) {
+        const close = document.createElement("span");
+        close.className = "pr-tab-close";
+        close.textContent = "×";
+        close.title = "Delete this timeline";
+        close.onclick = (e) => { e.stopPropagation(); this.deleteTab(i); };
+        btn.appendChild(close);
+      }
+      this.tabBar.appendChild(btn);
+    });
+
+    const addBtn = document.createElement("button");
+    addBtn.className = "pr-tab-add";
+    addBtn.textContent = "+";
+    addBtn.title = "New timeline";
+    addBtn.onclick = () => this.addTab();
+    this.tabBar.appendChild(addBtn);
+  }
+
+  _nextTabName() {
+    const names = new Set((this.tabs || []).map(t => t.name));
+    let n = (this.tabs || []).length + 1;
+    while (names.has(`Timeline ${n}`)) n++;
+    return `Timeline ${n}`;
+  }
+
+  // Snapshot the live length/frame-rate onto the active tab so switching away keeps it.
+  _captureActiveLength() {
+    if (!this.timeline) return;
+    if (!this.retakeMode) {
+      this.timeline.normalStartFrame = this.getStartFrames();
+      this.timeline.normalDurationFrames = this.getDurationFrames();
+    }
+    this.timeline.frameRate = this.getFrameRate();
+  }
+
+  addTab() {
+    this._captureActiveLength();
+    this.commitChanges(); // persist the current active tab first
+    const base = parseInitial("{}");
+    base.name = this._nextTabName();
+    base.frameRate = this.getFrameRate();
+    base.normalStartFrame = 0;
+    base.normalDurationFrames = this.getDurationFrames();
+    base._tabId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+    this.tabs.push(base);
+    this.switchToTab(this.tabs.length - 1);
+  }
+
+  switchToTab(i) {
+    if (!this.tabs || i < 0 || i >= this.tabs.length || i === this.activeTabIndex) return;
+    this._captureActiveLength();
+    this.commitChanges();                 // persist current active (this.timeline === active tab)
+    this.activeTabIndex = i;
+    this.timeline = this.tabs[i];
+    this.applyActiveTab();
+    this.renderTabBar();
+  }
+
+  // Re-hydrate the live editor from `this.timeline` (the active tab). Mirrors the
+  // load-from-file path so all the interlocking widget/UI state stays consistent.
+  applyActiveTab() {
+    const tl = this.timeline;
+    this.retakeMode = tl.retakeMode === true;
+    this.mainTrackEnabled = tl.mainTrackEnabled !== false;
+    this.audioTrackEnabled = tl.audioTrackEnabled !== false;
+    this.motionTrackEnabled = tl.motionTrackEnabled !== false;
+
+    if (this.node.properties) {
+      this.node.properties.mainTrackEnabled = this.mainTrackEnabled;
+      this.node.properties.audioTrackEnabled = this.audioTrackEnabled;
+      this.node.properties.motionTrackEnabled = this.motionTrackEnabled;
+      if (tl.showFilenames !== undefined) this.node.properties.showFilenames = tl.showFilenames;
+      if (tl.overrideAudio !== undefined) this.node.properties.overrideAudio = tl.overrideAudio;
+      if (tl.inpaint_audio !== undefined) this.node.properties.inpaint_audio = tl.inpaint_audio;
+    }
+
+    if (tl.propHeight !== undefined) {
+      this.propHeight = tl.propHeight;
+      if (this.propContainer) this.propContainer.style.height = `${this.propHeight}px`;
+    }
+    if (tl.globalPropHeight !== undefined) {
+      this.globalPropHeight = tl.globalPropHeight;
+      if (this.globalPropContainer) this.globalPropContainer.style.height = `${this.globalPropHeight}px`;
+    }
+
+    const inpaintWidget = this.node.widgets?.find(w => w.name === "inpaint_audio");
+    if (inpaintWidget && tl.inpaint_audio !== undefined) inpaintWidget.value = tl.inpaint_audio;
+    const overrideWidget = this.node.widgets?.find(w => w.name === "override_audio");
+    if (overrideWidget && tl.overrideAudio !== undefined) overrideWidget.value = tl.overrideAudio;
+
+    if (this.globalPromptInput) {
+      this.globalPromptInput.value = this.retakeMode ? (tl.retake_global_prompt || "") : (tl.global_prompt || "");
+    }
+
+    this.loadMedia();
+
+    // Restore this tab's own frame rate + length without triggering reentrant commits.
+    // try/finally guarantees the suppress flag is cleared even if a widget setter throws,
+    // otherwise all subsequent commitChanges() would silently no-op and lose edits.
+    this._suppressCommit = true;
+    try {
+      if (tl.frameRate && this.frameRateWidget) {
+        this.frameRateWidget.value = tl.frameRate;
+        if (this.frameRateWidget.callback) { try { this.frameRateWidget.callback(tl.frameRate); } catch (_) {} }
+      }
+      if (!this.retakeMode) {
+        if (tl.normalStartFrame !== undefined && this.startFramesWidget) {
+          this.startFramesWidget.value = tl.normalStartFrame;
+          if (this.startFramesWidget.callback) { try { this.startFramesWidget.callback(tl.normalStartFrame); } catch (_) {} }
+        }
+        if (tl.normalDurationFrames !== undefined && this.durationFramesWidget) {
+          this.durationFramesWidget.value = tl.normalDurationFrames;
+          if (this.durationFramesWidget.callback) { try { this.durationFramesWidget.callback(tl.normalDurationFrames); } catch (_) {} }
+        }
+      }
+    } finally {
+      this._suppressCommit = false;
+    }
+
+    this.selectedIndex = (tl.segments && tl.segments.length > 0) ? 0 : -1;
+    this.selectedSegmentIds = [];
+
+    this.updateRetakeUIState();
+    this.updateUIFromSelection();
+    this.syncWidgetsAndUI();
+    this.commitChanges(true);
+
+    if (this.updateInpaintToggleStyle) {
+      const iw = this.node.widgets?.find(w => w.name === "inpaint_audio");
+      if (iw) this.updateInpaintToggleStyle(iw.value);
+    }
+
+    this.render();
+    if (this.node) this.node.setDirtyCanvas?.(true, true);
+  }
+
+  promptRenameTab(i) {
+    if (!this.tabs || !this.tabs[i]) return;
+    const cur = this.tabs[i].name || `Timeline ${i + 1}`;
+    const name = window.prompt("Rename timeline:", cur);
+    if (name && name.trim()) {
+      this.tabs[i].name = name.trim();
+      this.renderTabBar();
+      this.commitChanges();
+    }
+  }
+
+  deleteTab(i) {
+    if (!this.tabs || this.tabs.length <= 1 || i < 0 || i >= this.tabs.length) return;
+    const name = this.tabs[i].name || `Timeline ${i + 1}`;
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+
+    const wasActive = (i === this.activeTabIndex);
+    this.tabs.splice(i, 1);
+    if (wasActive) {
+      this.activeTabIndex = Math.min(i, this.tabs.length - 1);
+      this.timeline = this.tabs[this.activeTabIndex];
+      this.applyActiveTab();
+    } else {
+      if (i < this.activeTabIndex) this.activeTabIndex--;
+      this.commitChanges();
+    }
+    this.renderTabBar();
+  }
+
+  // Copy a single segment into another tab's matching track (independent copy).
+  copySegmentToTab(seg, trackType, targetIndex) {
+    const target = this.tabs && this.tabs[targetIndex];
+    if (!target || !seg) return;
+    const canon = this.getCanonicalTrack(trackType);
+    const prop = this._tabTrackProp(canon);
+    if (!Array.isArray(target[prop])) target[prop] = [];
+
+    const { imgObj, videoEl, _isSeeking, thumbnails, _extractingThumbs, _sSecs, _lSecs, _tSecs, _dSecs, _uploading, _decoding, _blobUrl, _audioBuffer, ...rest } = seg;
+    // Fresh, unlinked id so it lands as a standalone segment in the target timeline.
+    const newSeg = { ...rest, id: Date.now().toString() + Math.random().toString(36).substr(2, 5) };
+    target[prop].push(newSeg);
+    this.commitChanges();
   }
 
   getSnappedPlayhead(mouseFrameX, logicalWidth) {
@@ -3725,6 +4065,7 @@ class TimelineEditor {
     this.viewport.style.minWidth = "0";
     this.layoutContainer.appendChild(this.viewport);
 
+    this.wrapper.appendChild(this.buildTabBar());
     this.wrapper.appendChild(toolbar);
     this.wrapper.appendChild(this.layoutContainer);
 
@@ -8849,6 +9190,23 @@ class TimelineEditor {
       })
     };
 
+    // --- Multi-tab: embed every timeline and remember the active one. ---
+    // The active tab is still mirrored to the top-level keys above (which the Python
+    // backend reads), so this block is purely additive and backward compatible.
+    if (Array.isArray(this.tabs) && this.tabs.length) {
+      this.timeline.name = this.timeline.name || `Timeline ${this.activeTabIndex + 1}`;
+      this.timeline.frameRate = this.getFrameRate();
+      toSave.name = this.timeline.name;
+      toSave.frameRate = this.timeline.frameRate;
+      toSave._tabId = this.timeline._tabId;
+
+      const activeBlob = Object.assign({}, toSave); // snapshot before we attach tab list
+      toSave.tabs = this.tabs.map((t, i) =>
+        (i === this.activeTabIndex) ? activeBlob : this._serializeTabBlob(t)
+      );
+      toSave.activeTab = this.activeTabIndex;
+    }
+
     const jsonStr = JSON.stringify(toSave);
     console.log("[LTXDirector debug] commitChanges: saving timelineDataWidget value:", jsonStr);
 
@@ -9635,6 +9993,17 @@ class TimelineEditor {
     menu.appendChild(copySegBtn);
     menu.appendChild(pasteSegBtn);
     menu.appendChild(pasteReplaceBtn);
+    // Copy this segment straight into another timeline tab.
+    if (Array.isArray(this.tabs) && this.tabs.length > 1) {
+      this.tabs.forEach((tab, ti) => {
+        if (ti === this.activeTabIndex) return;
+        const b = document.createElement("button");
+        b.className = "pr-gap-menu-btn";
+        b.innerHTML = `Copy to ▸ ${tab.name || `Timeline ${ti + 1}`}`;
+        b.onclick = () => { this.copySegmentToTab(seg, trackType, ti); this.dismissContextMenu(); };
+        menu.appendChild(b);
+      });
+    }
     menu.appendChild(makeDivider());
 
     // Group 2: Prompt Options (Only if not audio)
@@ -10120,7 +10489,11 @@ class TimelineEditor {
       }
 
       if (this.timelineDataWidget) this.timelineDataWidget.value = JSON.stringify(data.timeline || data);
-      this.timeline = parseInitial(this.timelineDataWidget.value);
+      const _loadedTabs = parseTabsRoot(this.timelineDataWidget.value);
+      this.tabs = _loadedTabs.tabs;
+      this.activeTabIndex = _loadedTabs.activeTab;
+      this.timeline = this.tabs[this.activeTabIndex];
+      if (this.renderTabBar) this.renderTabBar();
       this.mainTrackEnabled = this.timeline.mainTrackEnabled !== false;
       this.audioTrackEnabled = this.timeline.audioTrackEnabled !== false;
       this.motionTrackEnabled = this.timeline.motionTrackEnabled !== false;
@@ -11479,9 +11852,14 @@ app.registerExtension({
           if (this._timelineEditor) {
             console.log("[LTXDirector debug] setTimeout sync block called.");
             console.log("[LTXDirector debug] setTimeout: timelineDataWidget value:", this._timelineEditor.timelineDataWidget?.value);
-            const tl = parseInitial(this._timelineEditor.timelineDataWidget?.value);
+            // Tab-aware re-sync: rebuild all tabs and keep the active one live.
+            const _root = parseTabsRoot(this._timelineEditor.timelineDataWidget?.value);
+            this._timelineEditor.tabs = _root.tabs;
+            this._timelineEditor.activeTabIndex = _root.activeTab;
+            this._timelineEditor.timeline = _root.tabs[_root.activeTab];
+            if (this._timelineEditor.renderTabBar) this._timelineEditor.renderTabBar();
+            const tl = this._timelineEditor.timeline;
             console.log("[LTXDirector debug] setTimeout: parsed timeline:", JSON.stringify(tl));
-            this._timelineEditor.timeline = tl;
 
             // Sync editor states from the parsed timeline object (the absolute source of truth)
             this._timelineEditor.mainTrackEnabled = tl.mainTrackEnabled !== false;
