@@ -3155,6 +3155,13 @@ class TimelineEditor {
     addTextBtn.addEventListener("click", () => this.addTextSegmentFreeSpace());
     this.addTextBtn = addTextBtn;
 
+    const addGrayBtn = document.createElement("button");
+    addGrayBtn.className = "pr-btn";
+    addGrayBtn.innerHTML = `▦ Gray Frame`;
+    addGrayBtn.title = "Insert a 50% gray (127,127,127) keyframe — place between clips for the FLW transition IC-LoRA";
+    addGrayBtn.addEventListener("click", () => this.addGrayFrameFreeSpace());
+    this.addGrayBtn = addGrayBtn;
+
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "pr-btn pr-btn-danger";
     deleteBtn.innerHTML = `${ICONS.trash} Delete`;
@@ -3188,6 +3195,7 @@ class TimelineEditor {
     actionGroup.appendChild(this.videoFileInput);
     actionGroup.appendChild(uploadBtn);
     actionGroup.appendChild(addTextBtn);
+    actionGroup.appendChild(addGrayBtn);
     actionGroup.appendChild(uploadAudioBtn);
     actionGroup.appendChild(uploadVideoBtn);
     actionGroup.appendChild(uploadMotionBtn);
@@ -10694,6 +10702,15 @@ class TimelineEditor {
       };
       menu.appendChild(textBtn);
 
+      const grayBtn = document.createElement("button");
+      grayBtn.className = "pr-gap-menu-btn";
+      grayBtn.innerHTML = `▦ Gray Transition (FLW)`;
+      grayBtn.onclick = () => {
+        this.addGrayInGap(gap.frameStart, gap.frameEnd);
+        this.dismissContextMenu();
+      };
+      menu.appendChild(grayBtn);
+
       const imgBtn = document.createElement("button");
       imgBtn.className = "pr-gap-menu-btn";
       imgBtn.innerHTML = `${ICONS.upload} Image Segment`;
@@ -11707,6 +11724,73 @@ class TimelineEditor {
     this.selectedIndex = this.timeline.segments.findIndex(s => s.id === seg.id);
     this.updateUIFromSelection();
     this.commitChanges();
+  }
+
+  // ---- FLW transition helper: 50% gray (127,127,127) keyframes ----
+  // The SYSTMS FLW IC-LoRA makes shot-to-shot transitions from gray frames placed
+  // between clips. These build a gray image keyframe (a normal image guide with a
+  // solid-gray data URL, so the backend needs no changes).
+
+  _makeGrayImageDataURL() {
+    // Match the node's target aspect ratio when custom_width/height are set, so even the
+    // "pad" resize methods produce a fully-gray frame (no black/green bars).
+    let w = 64, h = 64;
+    const cw = Number(this.node?.widgets?.find(x => x.name === "custom_width")?.value) || 0;
+    const ch = Number(this.node?.widgets?.find(x => x.name === "custom_height")?.value) || 0;
+    if (cw > 0 && ch > 0) {
+      w = Math.min(256, cw);
+      h = Math.max(2, Math.round(w * ch / cw));
+    }
+    const c = document.createElement("canvas");
+    c.width = Math.max(2, w); c.height = Math.max(2, h);
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "rgb(127,127,127)";
+    ctx.fillRect(0, 0, c.width, c.height);
+    return c.toDataURL("image/png");
+  }
+
+  _makeGraySegment(start, length) {
+    const dataURL = this._makeGrayImageDataURL();
+    const img = new Image();
+    img.onload = () => { try { this.render(); } catch (_) {} };
+    img.src = dataURL;
+    return {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+      start, length: Math.max(1, length),
+      prompt: "", type: "image",
+      imageB64: dataURL,
+      imgObj: img,
+      isEndFrame: false,
+      isGrayFrame: true,
+    };
+  }
+
+  _insertGraySegment(seg) {
+    this.timeline.segments.push(seg);
+    this.timeline.segments.sort((a, b) => a.start - b.start);
+    if (!this.retakeMode) this.growTimelineIfNeeded(seg.start + seg.length);
+    this.selectionType = "image";
+    this.selectedIndex = this.timeline.segments.findIndex(s => s.id === seg.id);
+    this.updateUIFromSelection();
+    this.commitChanges();
+    this.render();
+  }
+
+  addGrayInGap(frameStart, frameEnd) {
+    this._insertGraySegment(this._makeGraySegment(frameStart, Math.max(1, frameEnd - frameStart)));
+  }
+
+  addGrayFrameFreeSpace() {
+    const frameRate = this.getFrameRate();
+    const newLength = Math.max(1, frameRate); // 1 second default
+    const sorted = [...this.timeline.segments].sort((a, b) => a.start - b.start);
+    let newStart = 0;
+    for (const seg of sorted) {
+      if (newStart + newLength <= seg.start) break;
+      newStart = Math.max(newStart, seg.start + seg.length);
+    }
+    const durationFrames = this.getVisualDurationFrames();
+    this._insertGraySegment(this._makeGraySegment(newStart, Math.min(newLength, Math.max(newLength, durationFrames - newStart))));
   }
 
   updateSeekBarBackground() {
