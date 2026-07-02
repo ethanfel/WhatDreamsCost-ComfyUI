@@ -339,6 +339,85 @@ async def ltx_director_open_folder(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+@PromptServer.instance.routes.post("/ltx_director_extract_marked_audio")
+async def ltx_director_extract_marked_audio(request):
+    """Extract the timeline audio inside the marked zone [start_frame, end_frame) and
+    save it as a WAV in the ComfyUI output directory. Reuses _build_combined_audio."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "invalid JSON"}, status=400)
+
+    timeline_data = data.get("timeline_data", "") or ""
+    try:
+        start_frame = int(data.get("start_frame", 0))
+        end_frame = int(data.get("end_frame", 0))
+        frame_rate = float(data.get("frame_rate", 24) or 24)
+    except (TypeError, ValueError):
+        return web.json_response({"success": False, "error": "bad numeric params"}, status=400)
+    override_audio = bool(data.get("override_audio", False))
+    name_hint = str(data.get("name", "") or "marked_audio")
+
+    duration = end_frame - start_frame
+    if duration <= 0:
+        return web.json_response({"success": False, "error": "empty marked zone (end must be after start)"}, status=400)
+    if not timeline_data:
+        return web.json_response({"success": False, "error": "no timeline data"}, status=400)
+
+    def _work():
+        import wave
+        import re
+        audio = _build_combined_audio(timeline_data, start_frame, duration, frame_rate, override_audio)
+        wf = audio.get("waveform")
+        sr = int(audio.get("sample_rate", 44100))
+        if wf is None or wf.numel() == 0:
+            return None, None, True
+        arr = wf[0].clamp(-1.0, 1.0).mul(32767.0).round().to(torch.int16).cpu().numpy()  # [channels, samples]
+        if arr.ndim == 1:
+            arr = np.stack([arr, arr], axis=0)
+        channels, n = arr.shape[0], arr.shape[1]
+        is_silent = bool(n == 0 or int(np.max(np.abs(arr))) == 0)
+        interleaved = np.empty((n * channels,), dtype=np.int16)
+        for c in range(channels):
+            interleaved[c::channels] = arr[c]
+
+        out_dir = folder_paths.get_output_directory()
+        os.makedirs(out_dir, exist_ok=True)
+        safe = re.sub(r'[^A-Za-z0-9._-]+', '_', name_hint).strip('_') or "marked_audio"
+        base = f"{safe}_{start_frame}-{end_frame}"
+        fname = base + ".wav"
+        path = os.path.join(out_dir, fname)
+        i = 1
+        while os.path.exists(path):
+            fname = f"{base}_{i}.wav"
+            path = os.path.join(out_dir, fname)
+            i += 1
+        with wave.open(path, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(interleaved.tobytes())
+        return fname, path, is_silent
+
+    try:
+        loop = asyncio.get_event_loop()
+        fname, path, is_silent = await loop.run_in_executor(None, _work)
+    except Exception as e:
+        log.error("[LTXDirector] extract marked audio failed: %s", e)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    if fname is None:
+        return web.json_response({"success": False, "error": "no audio produced"}, status=200)
+
+    return web.json_response({
+        "success": True,
+        "filename": fname,
+        "path": path,
+        "url": f"/view?filename={fname}&type=output",
+        "silent": is_silent,
+    })
+
+
 def _read_and_write_file_chunk(file, file_path, mode):
     chunk_bytes = file.file.read()
     with open(file_path, mode) as f:

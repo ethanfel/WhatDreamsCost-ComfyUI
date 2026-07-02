@@ -3511,6 +3511,22 @@ class TimelineEditor {
       this.markCurrentSelection();
     });
 
+    const extractAudioBtn = document.createElement("button");
+    extractAudioBtn.className = "pr-btn";
+    extractAudioBtn.style.padding = "6px";
+    extractAudioBtn.style.display = "flex";
+    extractAudioBtn.style.alignItems = "center";
+    extractAudioBtn.style.justifyContent = "center";
+    extractAudioBtn.style.width = "28px";
+    extractAudioBtn.style.height = "28px";
+    extractAudioBtn.style.boxSizing = "border-box";
+    extractAudioBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+    extractAudioBtn.title = "Extract the marked-zone audio and save it as a WAV (in ComfyUI output)";
+    extractAudioBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.extractMarkedAudio();
+    });
+
     const retakeToggleBtn = document.createElement("button");
     retakeToggleBtn.className = "pr-btn";
     retakeToggleBtn.style.padding = "4px 8px";
@@ -3592,6 +3608,7 @@ class TimelineEditor {
     btnGroup.appendChild(startBtn);
     btnGroup.appendChild(endBtn);
     btnGroup.appendChild(markBtn);
+    btnGroup.appendChild(extractAudioBtn);
     btnGroup.appendChild(helpBtn);
     btnGroup.appendChild(settingsBtn);
     rightGroup.appendChild(btnGroup);
@@ -5669,6 +5686,39 @@ class TimelineEditor {
       }
       this.commitChanges();
       this.render();
+    }
+  }
+
+  // Extract the timeline audio inside the marked zone [start_frame, end_frame) and
+  // save it as a WAV in the ComfyUI output folder (server-side reuse of the same audio
+  // mixer the node uses at generation time).
+  async extractMarkedAudio() {
+    const start = this.getStartFrames();
+    const end = this.endFramesWidget ? parseInt(this.endFramesWidget.value, 10) : (start + this.getDurationFrames());
+    if (!(end > start)) {
+      window.alert("Mark a zone first — the end frame must be after the start frame (use Mark Selection / set start & end).");
+      return;
+    }
+    const timeline_data = this.timelineDataWidget ? this.timelineDataWidget.value : "";
+    if (!timeline_data) { window.alert("No timeline data to extract audio from."); return; }
+    const frame_rate = this.getFrameRate();
+    const overrideWidget = this.node.widgets?.find(w => w.name === "override_audio");
+    const override_audio = !!(overrideWidget && overrideWidget.value);
+    try {
+      const resp = await api.fetchApi("/ltx_director_extract_marked_audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline_data, start_frame: start, end_frame: end, frame_rate, override_audio, name: "marked_audio" }),
+      });
+      const data = await resp.json();
+      if (data && data.success) {
+        const note = data.silent ? "\n(note: the marked zone had no audio — the file is silent)" : "";
+        window.alert(`Saved marked-zone audio to ComfyUI output:\n${data.filename}${note}`);
+      } else {
+        window.alert("Extract failed: " + ((data && data.error) || "unknown error"));
+      }
+    } catch (e) {
+      window.alert("Extract request failed: " + e.message);
     }
   }
 
