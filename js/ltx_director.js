@@ -311,7 +311,7 @@ const STYLES = `
     display: flex;
     flex-direction: column;
     gap: 4px;
-    z-index: 9999;
+    z-index: 1000;
     box-shadow: 0 4px 16px rgba(0,0,0,0.6);
   }
   .pr-gap-menu-btn {
@@ -465,7 +465,7 @@ const STYLES = `
     display: flex;
     flex-direction: column;
     gap: 8px;
-    z-index: 9999;
+    z-index: 1000;
     box-shadow: 0 4px 20px rgba(0,0,0,0.7);
     min-width: 250px;
   }
