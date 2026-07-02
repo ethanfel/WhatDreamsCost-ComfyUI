@@ -1130,7 +1130,8 @@ class LTXDirector(io.ComfyNode):
 
         # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
         # "segment_numbers" carries the 0-based timeline position of each guide (see below).
-        guide_data = {"images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "frame_rate": frame_rate}
+        # "original_images" holds each guide's pre-resize image (parallel to "images").
+        guide_data = {"images": [], "original_images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "frame_rate": frame_rate}
         derived_w, derived_h = custom_width, custom_height
         try:
             img_segs = [
@@ -1176,6 +1177,9 @@ class LTXDirector(io.ComfyNode):
                 else:
                     tensor = _load_image_tensor(seg)
 
+                # Keep the original (pre-resize) image; resize returns a new tensor so this ref stays intact.
+                original_tensor = tensor
+
                 # Apply resize
                 src_h, src_w = tensor.shape[1], tensor.shape[2]
 
@@ -1215,6 +1219,7 @@ class LTXDirector(io.ComfyNode):
                     insert_frame = max(0, seg_start - start_frame)
                 strength = strengths[idx] if idx < len(strengths) else 1.0
                 guide_data["images"].append(tensor)
+                guide_data["original_images"].append(original_tensor)
                 guide_data["insert_frames"].append(insert_frame)
                 guide_data["strengths"].append(float(strength))
                 guide_data["segment_numbers"].append(int(seg_position.get(seg.get("id"), idx)))
@@ -1293,6 +1298,7 @@ class LTXDirector(io.ComfyNode):
                     tensor = _resize_image(tensor, src_w, src_h, "maintain aspect ratio", divisible_by, resize_algo)
                 
                 guide_data["images"].append(tensor)
+                guide_data["original_images"].append(tensor)
                 guide_data["insert_frames"].append(0)
                 guide_data["strengths"].append(0.0)
                 guide_data["segment_numbers"].append(0)
@@ -1519,8 +1525,79 @@ class LTXDirector(io.ComfyNode):
         return io.NodeOutput(patched, conditioning, latent, audio_latent, guide_data, motion_guide_data, float(frame_rate), audio_out)
 
 
+class LTXKeyframeOut(io.ComfyNode):
+    """Extract a single keyframe's original (pre-resize) and resized image from an
+    LTX Director guide_data output, selected by its timeline segment number or by order."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXKeyframeOut",
+            display_name="LTX Keyframe Out",
+            category="WhatDreamsCost",
+            description=(
+                "Pull one keyframe's original (pre-resize) and resized image out of LTX "
+                "Director's guide_data. Select by the keyframe's timeline segment number, "
+                "or by its order among the keyframes."
+            ),
+            inputs=[
+                GuideData.Input("guide_data", tooltip="guide_data output from LTX Director."),
+                io.Int.Input(
+                    "keyframe", default=0, min=0, max=9999, step=1,
+                    tooltip="Which keyframe to extract (interpreted per 'select_by').",
+                ),
+                io.Combo.Input(
+                    "select_by", options=["segment number", "keyframe order"],
+                    default="segment number", optional=True,
+                    tooltip=(
+                        "'segment number' = the guide's timeline position (matches segment_number); "
+                        "'keyframe order' = its 0-based index among the keyframes. Falls back to order "
+                        "if the requested segment number has no keyframe."
+                    ),
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="original"),
+                io.Image.Output(display_name="resized"),
+                io.Int.Output(display_name="segment_number"),
+                io.Int.Output(display_name="insert_frame"),
+                io.Int.Output(display_name="keyframe_count"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, guide_data, keyframe=0, select_by="segment number") -> io.NodeOutput:
+        gd = guide_data or {}
+        images = gd.get("images", []) or []
+        originals = gd.get("original_images", []) or []
+        seg_nums = gd.get("segment_numbers", []) or []
+        insert_frames = gd.get("insert_frames", []) or []
+        count = len(images)
+
+        if count == 0:
+            empty = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+            return io.NodeOutput(empty, empty, -1, 0, 0)
+
+        # Resolve which keyframe to return.
+        i = None
+        if select_by == "segment number":
+            try:
+                i = seg_nums.index(int(keyframe))
+            except (ValueError, TypeError):
+                i = None
+        if i is None:
+            i = max(0, min(int(keyframe), count - 1))
+
+        resized = images[i]
+        original = originals[i] if i < len(originals) else resized
+        seg_no = int(seg_nums[i]) if i < len(seg_nums) else i
+        ins = int(insert_frames[i]) if i < len(insert_frames) else 0
+        return io.NodeOutput(original, resized, seg_no, ins, count)
+
+
 NODE_CLASS_MAPPINGS = {
     "LTXDirector": LTXDirector,
+    "LTXKeyframeOut": LTXKeyframeOut,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
