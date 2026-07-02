@@ -289,6 +289,7 @@ class LTXDirectorGuide:
                 "motion_guide_data": ("MOTION_GUIDE_DATA", {"tooltip": "Connect motion guide data from the timeline node to use IC-LoRA video guidance."}),
                 "model": ("MODEL", {"tooltip": "Connect model if using IC-LoRA for motion guidance."}),
                 "ic_lora_name": (["None"] + loras, {"default": "None", "tooltip": "Select the IC-LoRA model to use for motion guidance."}),
+                "ic_lora_name_in": ("STRING", {"forceInput": True, "tooltip": "Optional. Connect an 'LTX IC-LoRA Selector' node to choose the LoRA from elsewhere. Overrides the ic_lora_name widget above; 'None' disables the LoRA."}),
                 "ic_lora_strength": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                 "scale_by": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Scale the latent by this factor."}),
                 "upscale_method": (["nearest-exact", "bilinear", "area", "bicubic", "bislerp"], {"default": "bicubic", "tooltip": "Method used to upscale/downscale the latent."}),
@@ -307,7 +308,10 @@ class LTXDirectorGuide:
     FUNCTION = "execute"
 
     @classmethod
-    def execute(cls, positive, negative, vae, latent, guide_data, motion_guide_data=None, model=None, ic_lora_name="None", ic_lora_strength=1.0, scale_by=1.0, upscale_method="bicubic", image_attention_strength=1.0, crop="center", auto_snap_ic_grid=True, use_tiled_encode=False, tile_size=256, tile_overlap=64, retake_mode=False):
+    def execute(cls, positive, negative, vae, latent, guide_data, motion_guide_data=None, model=None, ic_lora_name="None", ic_lora_name_in=None, ic_lora_strength=1.0, scale_by=1.0, upscale_method="bicubic", image_attention_strength=1.0, crop="center", auto_snap_ic_grid=True, use_tiled_encode=False, tile_size=256, tile_overlap=64, retake_mode=False):
+        # A connected "LTX IC-LoRA Selector" overrides the ic_lora_name widget ("None" = disabled).
+        if ic_lora_name_in is not None and str(ic_lora_name_in).strip():
+            ic_lora_name = str(ic_lora_name_in).strip()
         motion_segments = (motion_guide_data or {}).get("segments", []) if motion_guide_data else []
         image_guides_count = len(guide_data.get("images", [])) if guide_data else 0
         print(f"[LTXDirectorGuide] execute started. motion_segments: {len(motion_segments)}, image_guides: {image_guides_count}, ic_lora_name: {ic_lora_name}, model connected: {model is not None}, retake_mode: {retake_mode}")
@@ -668,7 +672,35 @@ class LTXDirectorCropGuides:
         negative = node_helpers.conditioning_set_values(negative, clear_values)
         return (positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
 
+
+class LTXICLoraSelector:
+    """Select an IC-LoRA on its own node and feed the name into LTX Director Guide's
+    'ic_lora_name_in' input, so the LoRA dropdown can live elsewhere in the graph.
+    'None' disables the LoRA."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = folder_paths.get_filename_list("loras")
+        if not loras:
+            loras = ["put_ic_lora_in_ComfyUI_models_loras"]
+        return {
+            "required": {
+                "ic_lora_name": (["None"] + loras, {"default": "None", "tooltip": "IC-LoRA to feed into LTX Director Guide's 'ic_lora_name_in'. 'None' = LoRA disabled."}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("ic_lora_name",)
+    FUNCTION = "run"
+    CATEGORY = "WhatDreamsCost"
+
+    @classmethod
+    def run(cls, ic_lora_name="None"):
+        return (str(ic_lora_name),)
+
+
 NODE_CLASS_MAPPINGS = {
     "LTXDirectorGuide": LTXDirectorGuide,
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
+    "LTXICLoraSelector": LTXICLoraSelector,
 }
