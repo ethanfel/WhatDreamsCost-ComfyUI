@@ -2292,6 +2292,7 @@ class TimelineEditor {
     const props = ["segments", "motionSegments", "audioSegments"];
 
     if (res) {
+      const count = props.reduce((n, p) => n + ((res[p] || []).length), 0);
       props.forEach((prop, row) => {
         const y = row * ROWH;
         (res[prop] || []).forEach(s => {
@@ -2312,10 +2313,15 @@ class TimelineEditor {
           }
         });
       });
+      if (count === 0) {
+        ctx.fillStyle = "#777";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(`"${res.name || "Result"}" is empty — add clips to it, or drag a range here to move a Source section into it`, 8, H / 2 + 3);
+      }
     } else {
       ctx.fillStyle = "#666";
       ctx.font = "11px sans-serif";
-      ctx.fillText("No Result timeline selected", 8, H / 2 + 3);
+      ctx.fillText("No Result timeline selected (pick one in the dropdown)", 8, H / 2 + 3);
     }
 
     const r = this.resultRange;
