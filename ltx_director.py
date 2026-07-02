@@ -1034,18 +1034,6 @@ class LTXDirector(io.ComfyNode):
                     optional=True,
                     tooltip="How to resize image segments to fit the target dimensions.",
                 ),
-                io.Combo.Input(
-                    "resize_algo",
-                    options=["bilinear", "bilinear (antialias)", "bicubic", "bicubic (antialias)", "area", "nearest"],
-                    default="bilinear",
-                    optional=True,
-                    tooltip=(
-                        "Interpolation used when resizing guide images. The '(antialias)' variants "
-                        "reduce aliasing/shimmer when DOWNSCALING (only bilinear/bicubic support it; "
-                        "no effect when upscaling). 'area' is a solid antialiased downscale; 'nearest' "
-                        "is hard-edged."
-                    ),
-                ),
                 io.Int.Input(
                     "divisible_by", default=32, min=1, max=256, step=1, optional=True,
                     tooltip="Snap the final output image dimensions to be divisible by this number (e.g. 32 for LTX).",
@@ -1057,6 +1045,18 @@ class LTXDirector(io.ComfyNode):
                 io.Boolean.Input(
                     "override_audio", default=False, optional=True,
                     tooltip="Use the audio from the IC-LoRA video instead of using the audio track.",
+                ),
+                io.Combo.Input(
+                    "resize_algo",
+                    options=["bilinear", "bilinear (antialias)", "bicubic", "bicubic (antialias)", "area", "nearest"],
+                    default="bilinear",
+                    optional=True,
+                    tooltip=(
+                        "Interpolation used when resizing guide images. The '(antialias)' variants "
+                        "reduce aliasing/shimmer when DOWNSCALING (only bilinear/bicubic support it; "
+                        "no effect when upscaling). 'area' is a solid antialiased downscale; 'nearest' "
+                        "is hard-edged. (Kept last in the input list so it never shifts other widgets.)"
+                    ),
                 ),
                 io.String.Input(
                     "beats_json", multiline=True, default="", optional=True, force_input=True,
