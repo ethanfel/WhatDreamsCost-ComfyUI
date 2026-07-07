@@ -586,10 +586,11 @@ def _load_sibling_latent(seg):
         for nm in latent_names:
             candidates.append(os.path.join(d, nm))
 
+    candidates = list(dict.fromkeys(candidates))  # dedupe, keep order
     path = next((p for p in candidates if os.path.exists(p)), None)
     if not path:
-        log.info("[LTXDirector] No sibling latent for %s (tried %s in input/ and output/; "
-                 "name the .latent after the ORIGINAL clip name)", (orig or media), sorted(latent_names))
+        log.info("[LTXDirector] No sibling latent for %s. Checked these paths:\n  %s",
+                 (orig or media), "\n  ".join(candidates))
         return None
     try:
         import safetensors.torch
