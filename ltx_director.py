@@ -4,6 +4,7 @@ import json
 import base64
 import io as _io
 import math
+import threading
 
 import numpy as np
 import torch
@@ -2119,6 +2120,10 @@ class LTXExtendStep:
                 "state": (_EXTEND_ANY,),
                 "index": ("INT", {"default": 1, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Loop index from SxCP For Loop Start (1-based)."}),
             },
+            "optional": {
+                "seed_offset": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Seed rotation from a review retry loop (LTX Review Gate 'attempt'). seed = base_seed + index + seed_offset."}),
+                "prompts": (_EXTEND_ANY, {"tooltip": "Optional LIVE prompts list override (re-read every run). Wire your prompt source here too so 'Reload' re-pulls a changed prompt; else the Init-time list is used."}),
+            },
         }
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "LATENT", "GUIDE_DATA", "MOTION_GUIDE_DATA", "FLOAT", "AUDIO", "LTX_EXTEND_STATE", "INT", "STRING")
@@ -2126,11 +2131,12 @@ class LTXExtendStep:
     FUNCTION = "step"
     CATEGORY = "WhatDreamsCost"
 
-    def step(self, state, index):
+    def step(self, state, index, seed_offset=0, prompts=None):
         st = state or {}
         idx = int(index)
-        prompt = _pick_prompt(st.get("prompts"), st.get("global_prompt", ""), idx)
-        seed = (int(st.get("base_seed", 0)) + idx) & 0xffffffffffffffff
+        prompt_src = prompts if prompts is not None else st.get("prompts")
+        prompt = _pick_prompt(prompt_src, st.get("global_prompt", ""), idx)
+        seed = (int(st.get("base_seed", 0)) + idx + int(seed_offset)) & 0xffffffffffffffff
         fps = float(st.get("frame_rate", 24.0)) or 24.0
         r = _build_extend_pass(
             st.get("model"), st.get("clip"), st.get("latent"), prompt,
@@ -2183,6 +2189,117 @@ class LTXExtendCollect:
         log.info("[LTXExtendCollect] advanced audio %d px -> abs_pos %d px (%.2fs); next latent T=%d",
                  rel_off, new_abs, new_abs / fps, next_t)
         return (st,)
+
+
+# --- LTX Review Gate: human-in-the-loop pass / reroll / reload for the extend retry loop ---
+_review_events = {}    # node_id -> threading.Event
+_review_actions = {}   # node_id -> "pass" | "reroll" | "reload"
+
+
+@PromptServer.instance.routes.post("/ltx_review_decide")
+async def ltx_review_decide(request):
+    """Frontend button -> unblock the waiting LTX Review Gate with a decision."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    key = str(data.get("node_id", ""))
+    action = str(data.get("action", "")).lower()
+    if action not in ("pass", "reroll", "reload"):
+        return web.json_response({"ok": False, "error": "bad action"}, status=400)
+    _review_actions[key] = action
+    ev = _review_events.get(key)
+    if ev is not None:
+        ev.set()
+    return web.json_response({"ok": True})
+
+
+def _review_preview_frames(images, max_frames=16, quality=70):
+    """Sample up to max_frames evenly from an IMAGE tensor (B,H,W,3 in 0..1) -> base64 JPEG data URIs."""
+    out = []
+    try:
+        n = int(images.shape[0])
+        if n <= 0:
+            return out
+        count = min(max_frames, n)
+        idxs = [0] if count == 1 else [int(round(i * (n - 1) / (count - 1))) for i in range(count)]
+        for i in idxs:
+            arr = (images[i].detach().clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
+            im = Image.fromarray(arr)
+            buf = _io.BytesIO()
+            im.save(buf, format="JPEG", quality=quality)
+            out.append("data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii"))
+    except Exception as e:
+        log.error("[LTXReviewGate] preview encode failed: %s", e)
+    return out
+
+
+class LTXReviewGate:
+    """Human-in-the-loop review for the extend retry loop. BLOCKS, plays this attempt's decoded frames
+    in the node, and waits for Pass / Reroll / Reload.
+
+    Use as the CONDITION of an SxCP While Loop wrapped around [LTX Extend Step -> Guide -> samplers ->
+    VAE decode]. 'continue' drives the While Loop End condition (True = redo this step), 'attempt'
+    carries the seed-rotation counter (wire it back to the loop and into Step.seed_offset), and 'latent'
+    carries the approved result out. Reroll -> attempt+1 (new seed); Reload -> re-run so Step re-pulls
+    its live prompts input; Pass -> exit the retry loop with the shown latent."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "The decoded frames of THIS attempt (VAE decode of the pass's latent)."}),
+                "latent": ("LATENT", {"tooltip": "This attempt's latent (passed through on Pass)."}),
+                "attempt": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Seed-rotation counter carried by the While Loop (start 0)."}),
+            },
+            "optional": {
+                "auto_pass_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 1.0, "tooltip": "0 = wait forever for a button. >0 = auto-Pass after N seconds (unattended runs)."}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("BOOLEAN", "LATENT", "INT")
+    RETURN_NAMES = ("continue", "latent", "attempt")
+    FUNCTION = "review"
+    CATEGORY = "WhatDreamsCost"
+
+    def review(self, images, latent, attempt, auto_pass_seconds=0.0, unique_id=None):
+        key = str(unique_id)
+        ev = threading.Event()
+        _review_events[key] = ev
+        _review_actions.pop(key, None)
+
+        frames = _review_preview_frames(images)
+        try:
+            PromptServer.instance.send_sync("ltx_review_show",
+                                            {"node_id": key, "frames": frames, "attempt": int(attempt)})
+        except Exception as e:
+            log.error("[LTXReviewGate] preview push failed: %s", e)
+
+        # Block the worker thread until a button arrives (or auto-pass / user interrupt).
+        waited = 0.0
+        while not ev.wait(timeout=0.5):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            waited += 0.5
+            if auto_pass_seconds and waited >= float(auto_pass_seconds):
+                _review_actions[key] = "pass"
+                break
+
+        action = _review_actions.pop(key, "pass")
+        _review_events.pop(key, None)
+        try:
+            PromptServer.instance.send_sync("ltx_review_done", {"node_id": key, "action": action})
+        except Exception:
+            pass
+
+        if action == "reroll":
+            log.info("[LTXReviewGate] REROLL -> attempt %d (new seed), redo step", int(attempt) + 1)
+            return (True, latent, int(attempt) + 1)
+        if action == "reload":
+            log.info("[LTXReviewGate] RELOAD -> redo step (Step re-pulls its live prompts input)")
+            return (True, latent, int(attempt))
+        log.info("[LTXReviewGate] PASS -> exit retry loop, continue")
+        return (False, latent, int(attempt))
 
 
 NODE_CLASS_MAPPINGS = {
