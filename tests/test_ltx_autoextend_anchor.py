@@ -135,6 +135,29 @@ def test_anchor_cadence_uses_one_based_loop_steps(ltx_director):
     assert ltx_director._should_emit_anchor("auto", 0.0, step_index=1, anchor_every_n_steps=1) is False
 
 
+@pytest.mark.parametrize("anchor_strength", [float("nan"), float("inf"), float("-inf")])
+def test_build_extend_pass_skips_non_finite_anchor_strengths(ltx_director, anchor_strength):
+    anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
+
+    result = ltx_director._build_extend_pass(
+        model=object(),
+        clip=object(),
+        latent=_latent(frames=6),
+        prompt="continue",
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_image=anchor_image,
+        anchor_mode="image",
+        anchor_strength=anchor_strength,
+    )
+
+    guide_data = result["guide_data"]
+    assert result["source_anchor_added"] is False
+    assert len(guide_data["images"]) == 1
+    assert guide_data["strengths"] == [1.0]
+
+
 def test_build_extend_pass_without_anchor_keeps_single_tail_guide(ltx_director):
     result = ltx_director._build_extend_pass(
         model=object(),
@@ -180,6 +203,33 @@ def test_build_extend_pass_with_image_anchor_adds_weak_second_guide(ltx_director
     assert guide_data["guide_latents"][1] is None
 
 
+@pytest.mark.parametrize(
+    "anchor_image",
+    [
+        torch.ones((1, 0, 96, 3), dtype=torch.float32),
+        torch.ones((1, 64, 0, 3), dtype=torch.float32),
+    ],
+)
+def test_build_extend_pass_skips_empty_anchor_images(ltx_director, anchor_image):
+    result = ltx_director._build_extend_pass(
+        model=object(),
+        clip=object(),
+        latent=_latent(frames=6),
+        prompt="continue",
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_image=anchor_image,
+        anchor_mode="image",
+        anchor_strength=0.25,
+    )
+
+    guide_data = result["guide_data"]
+    assert result["source_anchor_added"] is False
+    assert len(guide_data["images"]) == 1
+    assert len(guide_data["guide_latents"]) == 1
+
+
 def test_build_extend_pass_with_latent_anchor_crops_to_one_frame(ltx_director):
     anchor_latent = _latent(frames=4, start=1000.0)
 
@@ -201,6 +251,34 @@ def test_build_extend_pass_with_latent_anchor_crops_to_one_frame(ltx_director):
     assert len(guide_data["guide_latents"]) == 2
     assert guide_data["guide_latents"][1].shape == (1, 128, 1, 2, 3)
     assert torch.equal(guide_data["guide_latents"][1], anchor_latent["samples"][:, :, :1].clone())
+
+
+@pytest.mark.parametrize(
+    "samples",
+    [
+        torch.empty((0, 128, 4, 2, 3), dtype=torch.float32),
+        torch.empty((1, 128, 4, 0, 3), dtype=torch.float32),
+        torch.empty((1, 128, 4, 2, 0), dtype=torch.float32),
+    ],
+)
+def test_build_extend_pass_skips_empty_anchor_latents(ltx_director, samples):
+    result = ltx_director._build_extend_pass(
+        model=object(),
+        clip=object(),
+        latent=_latent(frames=6),
+        prompt="continue",
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_latent={"samples": samples},
+        anchor_mode="latent",
+        anchor_strength=0.25,
+    )
+
+    guide_data = result["guide_data"]
+    assert result["source_anchor_added"] is False
+    assert len(guide_data["images"]) == 1
+    assert len(guide_data["guide_latents"]) == 1
 
 
 def test_build_extend_pass_auto_falls_back_from_bad_latent_to_image(ltx_director):

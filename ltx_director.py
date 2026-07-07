@@ -1843,9 +1843,10 @@ def _positive_int(value, default=1):
 
 def _safe_float(value, default=0.0):
     try:
-        return float(value)
+        result = float(value)
     except Exception:
         return float(default)
+    return result if math.isfinite(result) else float(default)
 
 
 def _should_emit_anchor(anchor_mode, anchor_strength, step_index=1, anchor_every_n_steps=1):
@@ -1865,6 +1866,8 @@ def _valid_anchor_image(anchor_image):
         and anchor_image.ndim == 4
         and int(anchor_image.shape[-1]) >= 3
         and int(anchor_image.shape[0]) >= 1
+        and int(anchor_image.shape[1]) > 0
+        and int(anchor_image.shape[2]) > 0
     )
 
 
@@ -1874,9 +1877,13 @@ def _extract_anchor_latent(anchor_latent, target_channels):
     samples = anchor_latent.get("samples")
     if not isinstance(samples, torch.Tensor) or samples.ndim != 5:
         return None
+    if int(samples.shape[0]) < 1:
+        return None
     if int(samples.shape[1]) != int(target_channels):
         return None
     if int(samples.shape[2]) < 1:
+        return None
+    if int(samples.shape[3]) < 1 or int(samples.shape[4]) < 1:
         return None
     return samples[0:1, :, :1, :, :].clone()
 
