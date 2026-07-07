@@ -303,3 +303,59 @@ def test_build_extend_pass_auto_falls_back_from_bad_latent_to_image(ltx_director
     assert result["source_anchor_added"] is True
     assert torch.equal(guide_data["images"][1], anchor_image)
     assert guide_data["guide_latents"][1] is None
+
+
+def test_extend_init_stores_anchor_state(ltx_director):
+    anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
+    anchor_latent = _latent(frames=4, start=1000.0)
+
+    (state,) = ltx_director.LTXExtendInit().init(
+        seed_latent=_latent(frames=6),
+        model="model",
+        clip="clip",
+        base_seed=100,
+        anchor_image=anchor_image,
+        anchor_latent=anchor_latent,
+        anchor_mode="auto",
+        anchor_strength=0.3,
+        anchor_every_n_steps=2,
+    )
+
+    assert state["anchor_image"] is anchor_image
+    assert state["anchor_latent"] is anchor_latent
+    assert state["anchor_mode"] == "auto"
+    assert state["anchor_strength"] == 0.3
+    assert state["anchor_every_n_steps"] == 2
+
+
+def test_extend_step_honors_anchor_every_n_steps(ltx_director):
+    state = {
+        "model": object(),
+        "clip": object(),
+        "latent": _latent(frames=6),
+        "base_seed": 100,
+        "prompts": ["one", "two"],
+        "global_prompt": "",
+        "extension_seconds": 1.0,
+        "guide_overlap_seconds": 0.5,
+        "frame_rate": 24.0,
+        "guide_strength": 1.0,
+        "epsilon": 1e-3,
+        "abs_pos_px": 0,
+        "master_audio": None,
+        "audio_vae": None,
+        "anchor_image": torch.ones((1, 64, 96, 3), dtype=torch.float32),
+        "anchor_latent": None,
+        "anchor_mode": "image",
+        "anchor_strength": 0.25,
+        "anchor_every_n_steps": 2,
+    }
+
+    step = ltx_director.LTXExtendStep()
+    first = step.step(state, index=1)
+    second = step.step(state, index=2)
+
+    first_guide_data = first[4]
+    second_guide_data = second[4]
+    assert len(first_guide_data["images"]) == 2
+    assert len(second_guide_data["images"]) == 1

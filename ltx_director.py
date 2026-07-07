@@ -2119,6 +2119,22 @@ class LTXAutoExtend(io.ComfyNode):
                 io.Float.Input(
                     "epsilon", default=1e-3, min=0.0, max=1.0, step=1e-4, optional=True,
                 ),
+                io.Image.Input(
+                    "anchor_image", optional=True,
+                    tooltip="Optional pristine/source keyframe used as a weak identity anchor for long extensions.",
+                ),
+                io.Latent.Input(
+                    "anchor_latent", optional=True,
+                    tooltip="Optional source latent anchor. When compatible, this avoids VAE re-encoding and uses the first latent frame.",
+                ),
+                io.Combo.Input(
+                    "anchor_mode", options=["off", "auto", "image", "latent"], default="off", optional=True,
+                    tooltip="'off' preserves old behavior. 'auto' uses anchor_latent when valid, otherwise anchor_image.",
+                ),
+                io.Float.Input(
+                    "anchor_strength", default=0.25, min=0.0, max=1.0, step=0.01, optional=True,
+                    tooltip="Weak source-anchor guide strength. Recommended range: 0.15-0.35.",
+                ),
             ],
             outputs=[
                 io.Model.Output(display_name="model"),
@@ -2137,12 +2153,14 @@ class LTXAutoExtend(io.ComfyNode):
     @classmethod
     def execute(cls, model, clip, latent, prompt="", seed=0, extension_seconds=12.0,
                 guide_overlap_seconds=3.0, frame_rate=24.0, audio=None, audio_vae=None,
-                guide_strength=1.0, epsilon=1e-3) -> io.NodeOutput:
+                guide_strength=1.0, epsilon=1e-3, anchor_image=None, anchor_latent=None,
+                anchor_mode="off", anchor_strength=0.25) -> io.NodeOutput:
         # Manual chain: the fed audio starts at the incoming latent's frame 0, so audio_base_px = 0.
         r = _build_extend_pass(
             model, clip, latent, prompt, extension_seconds, guide_overlap_seconds, frame_rate,
             audio=audio, audio_vae=audio_vae, guide_strength=guide_strength, epsilon=epsilon,
-            audio_base_px=0, log_tag="LTXAutoExtend",
+            audio_base_px=0, log_tag="LTXAutoExtend", anchor_image=anchor_image,
+            anchor_latent=anchor_latent, anchor_mode=anchor_mode, anchor_strength=anchor_strength,
         )
         log.info("[LTXAutoExtend] guide tail=%d latent frames -> window %d px (%d latent), +%.2fs new, seed=%d",
                  r["n_overlap_lat"], r["window_px"], r["latent_t"], float(extension_seconds), int(seed))
@@ -2209,6 +2227,11 @@ class LTXExtendInit:
                 "guide_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "epsilon": ("FLOAT", {"default": 1e-3, "min": 0.0, "max": 1.0, "step": 1e-4}),
                 "resume_from_seconds": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 100000.0, "step": 0.01, "tooltip": "Fresh run: leave -1 (seed starts at master 0). Resume: master-timeline position of the latent you're feeding (from the previous Step log)."}),
+                "anchor_image": ("IMAGE", {"tooltip": "Optional pristine/source keyframe to carry as a weak identity anchor."}),
+                "anchor_latent": ("LATENT", {"tooltip": "Optional source latent anchor. Uses the first latent frame when compatible."}),
+                "anchor_mode": (["off", "auto", "image", "latent"], {"default": "off", "tooltip": "'off' preserves old behavior. 'auto' prefers latent then image."}),
+                "anchor_strength": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weak source-anchor guide strength. Recommended range: 0.15-0.35."}),
+                "anchor_every_n_steps": ("INT", {"default": 1, "min": 1, "max": 100000, "step": 1, "tooltip": "Emit the source anchor every N extension steps. 1 = every step."}),
             },
         }
 
@@ -2219,7 +2242,9 @@ class LTXExtendInit:
 
     def init(self, seed_latent, model, clip, base_seed, prompts=None, global_prompt="",
              audio=None, audio_vae=None, extension_seconds=12.0, guide_overlap_seconds=3.0,
-             frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, resume_from_seconds=-1.0):
+             frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, resume_from_seconds=-1.0,
+             anchor_image=None, anchor_latent=None, anchor_mode="off", anchor_strength=0.25,
+             anchor_every_n_steps=1):
         fps = float(frame_rate) if frame_rate else 24.0
         abs_pos_px = 0 if (resume_from_seconds is None or float(resume_from_seconds) < 0) else int(round(float(resume_from_seconds) * fps))
         state = {
@@ -2228,6 +2253,10 @@ class LTXExtendInit:
             "latent": seed_latent, "abs_pos_px": abs_pos_px,
             "extension_seconds": float(extension_seconds), "guide_overlap_seconds": float(guide_overlap_seconds),
             "frame_rate": fps, "guide_strength": float(guide_strength), "epsilon": float(epsilon),
+            "anchor_image": anchor_image, "anchor_latent": anchor_latent,
+            "anchor_mode": _normalize_anchor_mode(anchor_mode),
+            "anchor_strength": _safe_float(anchor_strength, 0.25),
+            "anchor_every_n_steps": _positive_int(anchor_every_n_steps, 1),
         }
         nprompts = len(prompts) if isinstance(prompts, (list, tuple)) else ("text" if prompts else "none")
         log.info("[LTXExtendInit] packed state: seed latent T=%d, abs_pos=%d px (%.2fs), base_seed=%d, prompts=%s",
@@ -2272,6 +2301,9 @@ class LTXExtendStep:
             st.get("frame_rate", 24.0), audio=st.get("master_audio"), audio_vae=st.get("audio_vae"),
             guide_strength=st.get("guide_strength", 1.0), epsilon=st.get("epsilon", 1e-3),
             audio_base_px=int(st.get("abs_pos_px", 0)), log_tag="LTXExtendStep",
+            anchor_image=st.get("anchor_image"), anchor_latent=st.get("anchor_latent"),
+            anchor_mode=st.get("anchor_mode", "off"), anchor_strength=st.get("anchor_strength", 0.25),
+            anchor_every_n_steps=st.get("anchor_every_n_steps", 1), step_index=idx,
         )
         preview = (prompt[:60] + "...") if len(prompt) > 60 else prompt
         log.info("[LTXExtendStep] index=%d seed=%d prompt=%r -> window %d px (%d latent) at master %.2fs",
