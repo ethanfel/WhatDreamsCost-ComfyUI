@@ -103,10 +103,10 @@ def _install_stubs(monkeypatch):
 def ltx_director(monkeypatch):
     _install_stubs(monkeypatch)
     module_name = "wdc.ltx_director"
-    sys.modules.pop(module_name, None)
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
     spec = importlib.util.spec_from_file_location(module_name, ROOT / "ltx_director.py")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
+    monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "_encode_relay", lambda model, clip, latent, prompt, local_prompts, segment_lengths, epsilon: (model, {"prompt": prompt}))
     return module
@@ -172,8 +172,8 @@ def test_build_extend_pass_with_image_anchor_adds_weak_second_guide(ltx_director
     guide_data = result["guide_data"]
     assert result["source_anchor_added"] is True
     assert len(guide_data["images"]) == 2
-    assert guide_data["images"][1] is anchor_image
-    assert guide_data["original_images"][1] is anchor_image
+    assert torch.equal(guide_data["images"][1], anchor_image)
+    assert torch.equal(guide_data["original_images"][1], anchor_image)
     assert guide_data["insert_frames"] == [0, 0]
     assert guide_data["strengths"] == [1.0, 0.25]
     assert guide_data["segment_numbers"] == [0, -1]
@@ -223,5 +223,5 @@ def test_build_extend_pass_auto_falls_back_from_bad_latent_to_image(ltx_director
 
     guide_data = result["guide_data"]
     assert result["source_anchor_added"] is True
-    assert guide_data["images"][1] is anchor_image
+    assert torch.equal(guide_data["images"][1], anchor_image)
     assert guide_data["guide_latents"][1] is None
