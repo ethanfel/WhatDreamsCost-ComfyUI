@@ -2457,34 +2457,69 @@ def _review_temp_name(key, attempt, ext):
     return f"ltx_review_{safe}_{int(attempt)}.{ext}"
 
 
-def _review_encode_video(images, fps, key, attempt):
-    """Encode the attempt's frames to a temp mp4 at the given fps -> /view URL, so the preview is a real
-    <video> playing at the right speed (not a fixed-rate slideshow). None on failure (JS uses frames)."""
-    if PromptServer is None or folder_paths is None or not hasattr(images, "shape"):
-        return None
+def _review_encode_one(images, audio, fps, key, attempt, with_audio):
+    """One mp4 encode attempt: frames at fps, optionally MUXING the audio window into the same file so
+    video+audio are a single synced stream (scrubs together, no drift). Returns the /view URL."""
+    n = int(images.shape[0]); H = int(images.shape[1]); W = int(images.shape[2])
+    if n <= 0:
+        raise ValueError("no frames")
+    W2 = W - (W % 2); H2 = H - (H % 2)  # yuv420p needs even dims
+    fps_i = max(1, int(round(float(fps) or 24)))
+    tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
+    fname = _review_temp_name(key, attempt, "mp4")
+    container = av.open(os.path.join(tmp, fname), mode="w")
     try:
-        n = int(images.shape[0]); H = int(images.shape[1]); W = int(images.shape[2])
-        if n <= 0:
-            return None
-        W2 = W - (W % 2); H2 = H - (H % 2)  # yuv420p needs even dims
-        fps_i = max(1, int(round(float(fps) or 24)))
-        tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
-        fname = _review_temp_name(key, attempt, "mp4")
-        container = av.open(os.path.join(tmp, fname), mode="w")
         vs = container.add_stream("libx264", rate=fps_i)
         vs.width = W2; vs.height = H2; vs.pix_fmt = "yuv420p"
-        for i in range(n):
+        astream = None; samples = None; sr = 44100; layout = "stereo"
+        if with_audio and isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
+            wf = audio["waveform"]
+            if wf.ndim == 3:
+                wf = wf[0]
+            wf = wf.cpu().float().clamp(-1, 1).contiguous()
+            ch = int(wf.shape[0]); layout = "stereo" if ch >= 2 else "mono"
+            sr = int(audio.get("sample_rate", 44100))
+            samples = np.ascontiguousarray(wf.numpy())  # [ch, N] float32 (planar = fltp)
+            astream = container.add_stream("aac", rate=sr)
+            astream.layout = layout
+        for i in range(n):  # video frames
             arr = (images[i, :H2, :W2, :3].detach().clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
             vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(arr), format="rgb24")
             for pkt in vs.encode(vf):
                 container.mux(pkt)
         for pkt in vs.encode():
             container.mux(pkt)
+        if astream is not None:  # audio frames, chunked to the aac frame size
+            nsamp = samples.shape[1]; pts = 0
+            for s in range(0, nsamp, 1024):
+                seg = np.ascontiguousarray(samples[:, s:s + 1024])
+                af = av.AudioFrame.from_ndarray(seg, format="fltp", layout=layout)
+                af.sample_rate = sr; af.pts = pts; pts += seg.shape[1]
+                for pkt in astream.encode(af):
+                    container.mux(pkt)
+            for pkt in astream.encode():
+                container.mux(pkt)
+    finally:
         container.close()
-        return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+    return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+
+
+def _review_encode_video(images, audio, fps, key, attempt):
+    """Encode a temp mp4 at fps, muxing the audio in so it's ONE synced file. Returns (url, has_audio):
+    tries video+audio first, falls back to video-only, then None (JS uses the frame slideshow)."""
+    if PromptServer is None or folder_paths is None or not hasattr(images, "shape"):
+        return None, False
+    has_audio = isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor)
+    if has_audio:
+        try:
+            return _review_encode_one(images, audio, fps, key, attempt, True), True
+        except Exception as e:
+            log.info("[LTXReviewGate] muxed encode failed (%s) — trying video-only.", e)
+    try:
+        return _review_encode_one(images, None, fps, key, attempt, False), False
     except Exception as e:
         log.info("[LTXReviewGate] video encode failed (%s) — using frame slideshow.", e)
-        return None
+        return None, False
 
 
 def _review_serve_audio(audio, key, attempt):
@@ -2551,9 +2586,10 @@ class LTXReviewGate:
             except Exception:
                 key = str(unique_id)
 
-        # Always push the preview (video + audio) to the node.
-        video_url = _review_encode_video(images, fps, key, attempt)
-        audio_url = _review_serve_audio(audio, key, attempt)
+        # Always push the preview to the node. The mp4 muxes the audio in (one synced <video>); a
+        # separate audio_url is only sent when the audio ISN'T in the video (video-only or slideshow).
+        video_url, video_has_audio = _review_encode_video(images, audio, fps, key, attempt)
+        audio_url = None if (video_url and video_has_audio) else _review_serve_audio(audio, key, attempt)
         frames = [] if video_url else _review_preview_frames(images)  # frames only as a fallback
         try:
             PromptServer.instance.send_sync("ltx_review_show",
