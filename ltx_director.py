@@ -1336,7 +1336,7 @@ class LTXDirector(io.ComfyNode):
         # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
         # "segment_numbers" carries the 0-based timeline position of each guide (see below).
         # "original_images" holds each guide's pre-resize image (parallel to "images").
-        guide_data = {"images": [], "original_images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "latent_clips": [], "frame_rate": frame_rate}
+        guide_data = {"images": [], "original_images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "guide_latents": [], "frame_rate": frame_rate}
         derived_w, derived_h = custom_width, custom_height
         try:
             img_segs = [
@@ -1424,19 +1424,20 @@ class LTXDirector(io.ComfyNode):
                     insert_frame = max(0, seg_start - start_frame)
                 strength = strengths[idx] if idx < len(strengths) else 1.0
 
-                # If a '<clip>.latent' sibling exists, use it directly (max quality) and skip
-                # encoding this segment as a keyframe. The video is only used for preview/dims.
+                # If a '<clip>.latent' sibling exists, feed it as this guide's latent instead of
+                # VAE-re-encoding the clip (max quality). It still flows through the normal
+                # keyframe-guide path (append_keyframe) in the Guide, which is what conditions the
+                # model to continue — that's why the decoded video already extends correctly.
                 sibling_latent = _load_sibling_latent(seg, [latent_dir])
                 if sibling_latent is not None:
-                    guide_data["latent_clips"].append({"samples": sibling_latent, "insert_frame": insert_frame})
                     log.info("[LTXDirector] Using sibling latent for %s", seg.get("imageFile"))
-                    continue
 
                 guide_data["images"].append(tensor)
                 guide_data["original_images"].append(original_tensor)
                 guide_data["insert_frames"].append(insert_frame)
                 guide_data["strengths"].append(float(strength))
                 guide_data["segment_numbers"].append(int(seg_position.get(seg.get("id"), idx)))
+                guide_data["guide_latents"].append(sibling_latent)
             
             # If no images were loaded from the timeline, create a dummy image at strength 0
             # to prevent artifacts in text-to-video mode.
@@ -1516,6 +1517,7 @@ class LTXDirector(io.ComfyNode):
                 guide_data["insert_frames"].append(0)
                 guide_data["strengths"].append(0.0)
                 guide_data["segment_numbers"].append(0)
+                guide_data["guide_latents"].append(None)
 
                 derived_w = tensor.shape[2]
                 derived_h = tensor.shape[1]

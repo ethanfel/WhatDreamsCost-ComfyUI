@@ -357,6 +357,7 @@ class LTXDirectorGuide:
         images = guide_data.get("images", []) if guide_data else []
         insert_frames = guide_data.get("insert_frames", []) if guide_data else []
         strengths = guide_data.get("strengths", []) if guide_data else []
+        guide_latents = guide_data.get("guide_latents", []) if guide_data else []  # sibling .latent per image (or None)
         
         director_fps = float((motion_guide_data or {}).get("frame_rate", guide_data.get("frame_rate", 24) if guide_data else 24))
         segments = (motion_guide_data or {}).get("segments", [])
@@ -492,16 +493,34 @@ class LTXDirectorGuide:
                 if strength <= 0.0:
                     continue
 
-                B_img, H_img, W_img, C_img = img_tensor.shape
-                target_pix_w = int(latent_width * 32)
-                target_pix_h = int(latent_height * 32)
-                if target_pix_w != W_img or target_pix_h != H_img:
-                    img_nchw = img_tensor.permute(0, 3, 1, 2)
-                    img_resized = comfy.utils.common_upscale(img_nchw, target_pix_w, target_pix_h, upscale_method, "disabled")
-                    img_tensor = img_resized.permute(0, 2, 3, 1)
+                # Use a pre-computed sibling latent as the guide (max quality, no VAE re-encode) —
+                # routed through the SAME append_keyframe path as an encoded clip so it conditions
+                # the extension. Only if its channels/spatial match this pass; else re-encode.
+                pre_latent = guide_latents[idx] if idx < len(guide_latents) else None
+                if pre_latent is not None and not (
+                    pre_latent.shape[1] == latent_image.shape[1]
+                    and pre_latent.shape[-2] == latent_height
+                    and pre_latent.shape[-1] == latent_width
+                ):
+                    print(f"[LTXDirectorGuide] sibling latent {tuple(pre_latent.shape)} != target "
+                          f"(C={latent_image.shape[1]}, {latent_height}x{latent_width}); re-encoding the clip instead.")
+                    pre_latent = None
 
-                image_pixels, guide_latent = nodes_lt.LTXVAddGuide.encode(vae, latent_width, latent_height, img_tensor, scale_factors)
-                frame_idx, latent_idx = nodes_lt.LTXVAddGuide.get_latent_index(positive, latent_length, len(image_pixels), int(f_idx), scale_factors)
+                if pre_latent is not None:
+                    guide_latent = pre_latent.to(device=latent_image.device, dtype=latent_image.dtype)
+                    num_pix = (int(guide_latent.shape[2]) - 1) * int(scale_factors[0]) + 1
+                    frame_idx, latent_idx = nodes_lt.LTXVAddGuide.get_latent_index(positive, latent_length, num_pix, int(f_idx), scale_factors)
+                    print(f"[LTXDirectorGuide] Using sibling latent as guide ({guide_latent.shape[2]} latent frames) at frame {f_idx}")
+                else:
+                    B_img, H_img, W_img, C_img = img_tensor.shape
+                    target_pix_w = int(latent_width * 32)
+                    target_pix_h = int(latent_height * 32)
+                    if target_pix_w != W_img or target_pix_h != H_img:
+                        img_nchw = img_tensor.permute(0, 3, 1, 2)
+                        img_resized = comfy.utils.common_upscale(img_nchw, target_pix_w, target_pix_h, upscale_method, "disabled")
+                        img_tensor = img_resized.permute(0, 2, 3, 1)
+                    image_pixels, guide_latent = nodes_lt.LTXVAddGuide.encode(vae, latent_width, latent_height, img_tensor, scale_factors)
+                    frame_idx, latent_idx = nodes_lt.LTXVAddGuide.get_latent_index(positive, latent_length, len(image_pixels), int(f_idx), scale_factors)
 
                 if latent_idx >= latent_length:
                     continue
@@ -596,36 +615,6 @@ class LTXDirectorGuide:
 
         else:
             print("[LTXDirectorGuide] No timeline guides present. Passing through.")
-
-        # --- Paste any '<clip>.latent' sibling clips the Director loaded (max quality, no VAE
-        # re-encode). Placed last so they're authoritative over keyframe/motion guides in that
-        # region, and frozen (noise_mask=0) to preserve them exactly. insert_frame is already
-        # relative to the generation window; clamp to the real generation frames. ---
-        for clip in (guide_data.get("latent_clips", []) if guide_data else []):
-            try:
-                samples = clip.get("samples")
-                if samples is None:
-                    continue
-                samples = samples.to(device=latent_image.device, dtype=latent_image.dtype)
-                lat_start = int(clip.get("insert_frame", 0)) // time_scale_factor
-                lat_start = max(0, min(lat_start, initial_latent_length))
-                n = min(int(samples.shape[2]), initial_latent_length - lat_start)
-                shapes_ok = (
-                    samples.shape[0] == latent_image.shape[0]
-                    and samples.shape[1] == latent_image.shape[1]
-                    and samples.shape[3] == latent_image.shape[3]
-                    and samples.shape[4] == latent_image.shape[4]
-                )
-                if n > 0 and shapes_ok:
-                    latent_image[:, :, lat_start:lat_start + n] = samples[:, :, :n]
-                    noise_mask[:, :, lat_start:lat_start + n] = 0.0
-                    print(f"[LTXDirectorGuide] Using sibling latent at latent frames {lat_start}:{lat_start + n}")
-                elif not shapes_ok:
-                    print(f"[LTXDirectorGuide] sibling latent {tuple(samples.shape)} incompatible with target {tuple(latent_image.shape)} (channels/spatial/batch must match); skipped.")
-                else:
-                    print("[LTXDirectorGuide] sibling latent falls outside the generated range; skipped.")
-            except Exception as e:
-                print(f"[LTXDirectorGuide] sibling latent paste failed: {e}")
 
         exact_crop_frames = max(0, int(latent_image.shape[2]) - initial_latent_length)
         positive = node_helpers.conditioning_set_values(positive, {"nghtdrp_guide_crop_latent_frames": exact_crop_frames})
