@@ -1960,7 +1960,19 @@ class LTXAutoExtend(io.ComfyNode):
         # --- positive conditioning + patched model (single prompt = no per-segment masking) ---
         patched, conditioning = _encode_relay(model, clip, video_latent, prompt or "", "", "", float(epsilon))
 
-        # --- Audio: use this pass's window, thread the remainder onward ---
+        # --- Audio: auto-align to this pass's window, thread the remainder onward ---
+        # No manual pre-cut needed: the audio you feed starts at the incoming latent's frame 0
+        # (pass 1 = the full master audio, aligned to the seed's start). This pass's guide is the
+        # incoming latent's TAIL (the last n_overlap_lat latent frames = tail_start onward), so the
+        # window begins exactly offset_px = tail_start * 8 pixel frames in. Working in integer pixel
+        # frames (NOT rounded seconds) keeps audio and video on the SAME grid: the per-pass audio
+        # advance equals the per-pass NEW video (ltxv_length - overlap), so there's zero lipsync drift
+        # over a long chain. One rule handles both cases: pass 1 offsets by (seed_len - overlap),
+        # every steady-state pass offsets by the new-content length. remaining_audio starts at that
+        # same offset so the next node self-aligns off ITS incoming latent.
+        tail_start_lat = T_in - n_overlap_lat
+        offset_px = max(0, tail_start_lat * tsf)
+
         def _empty_audio(nsamp):
             return {"waveform": torch.zeros((1, 2, max(1, nsamp)), dtype=torch.float32), "sample_rate": target_sr}
 
@@ -1969,19 +1981,21 @@ class LTXAutoExtend(io.ComfyNode):
             if wf.ndim == 2:
                 wf = wf.unsqueeze(0)
             sr = int(audio.get("sample_rate", target_sr))
-            win_s = max(1, int(round(window_px / fps * sr)))   # window matches the video length
-            adv_s = max(1, int(round(ext_px / fps * sr)))      # advance by the NEW portion only
-            win = wf[..., :win_s]
+            off_s = max(0, int(round(offset_px / fps * sr)))
+            win_s = max(1, int(round(ltxv_length / fps * sr)))   # window matches the ACTUAL video length
+            win = wf[..., off_s:off_s + win_s]
             if win.shape[-1] < win_s:  # pad the tail pass if the audio runs short
                 pad = torch.zeros((*win.shape[:-1], win_s - win.shape[-1]), dtype=win.dtype, device=win.device)
                 win = torch.cat([win, pad], dim=-1)
             combined_audio = {"waveform": win.contiguous(), "sample_rate": sr}
-            rem = wf[..., adv_s:]
+            rem = wf[..., off_s:]
             if rem.shape[-1] <= 0:
                 rem = torch.zeros((*wf.shape[:-1], 1), dtype=wf.dtype, device=wf.device)
             remaining_audio = {"waveform": rem.contiguous(), "sample_rate": sr}
+            log.info("[LTXAutoExtend] audio: incoming %d px -> offset %d px (%.2fs), window %d px (%.2fs), sr=%d",
+                     (T_in - 1) * tsf + 1, offset_px, offset_px / fps, ltxv_length, ltxv_length / fps, sr)
         else:
-            win_samples = int(round(window_px / fps * target_sr))
+            win_samples = int(round(ltxv_length / fps * target_sr))
             combined_audio = _empty_audio(win_samples)
             remaining_audio = _empty_audio(1)
 
