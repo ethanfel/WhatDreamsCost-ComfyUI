@@ -1826,9 +1826,117 @@ class LTXKeyframeOut(io.ComfyNode):
         return io.NodeOutput(original, resized, seg_no, ins, count)
 
 
+_ANCHOR_MODES = {"off", "auto", "image", "latent"}
+
+
+def _normalize_anchor_mode(anchor_mode):
+    mode = str(anchor_mode or "off").strip().lower()
+    return mode if mode in _ANCHOR_MODES else "off"
+
+
+def _positive_int(value, default=1):
+    try:
+        return max(1, int(value))
+    except Exception:
+        return int(default)
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _should_emit_anchor(anchor_mode, anchor_strength, step_index=1, anchor_every_n_steps=1):
+    mode = _normalize_anchor_mode(anchor_mode)
+    if mode == "off":
+        return False
+    if _safe_float(anchor_strength, 0.0) <= 0.0:
+        return False
+    every = _positive_int(anchor_every_n_steps, 1)
+    idx = _positive_int(step_index, 1)
+    return ((idx - 1) % every) == 0
+
+
+def _valid_anchor_image(anchor_image):
+    return (
+        isinstance(anchor_image, torch.Tensor)
+        and anchor_image.ndim == 4
+        and int(anchor_image.shape[-1]) >= 3
+        and int(anchor_image.shape[0]) >= 1
+    )
+
+
+def _extract_anchor_latent(anchor_latent, target_channels):
+    if not isinstance(anchor_latent, dict):
+        return None
+    samples = anchor_latent.get("samples")
+    if not isinstance(samples, torch.Tensor) or samples.ndim != 5:
+        return None
+    if int(samples.shape[1]) != int(target_channels):
+        return None
+    if int(samples.shape[2]) < 1:
+        return None
+    return samples[0:1, :, :1, :, :].clone()
+
+
+def _append_source_anchor_guide(
+    guide_data,
+    dummy_img,
+    target_channels,
+    anchor_image=None,
+    anchor_latent=None,
+    anchor_mode="off",
+    anchor_strength=0.25,
+    anchor_every_n_steps=1,
+    step_index=1,
+    log_tag="LTXAutoExtend",
+):
+    if not _should_emit_anchor(anchor_mode, anchor_strength, step_index, anchor_every_n_steps):
+        return False
+
+    mode = _normalize_anchor_mode(anchor_mode)
+    image_ok = _valid_anchor_image(anchor_image)
+    latent_guide = None
+
+    if mode in ("auto", "latent"):
+        latent_guide = _extract_anchor_latent(anchor_latent, target_channels)
+        if latent_guide is None and anchor_latent is not None:
+            log.warning("[%s] source anchor latent is incompatible; falling back to image anchor.", log_tag)
+
+    if latent_guide is None and mode == "latent" and not image_ok:
+        return False
+    if latent_guide is None and mode in ("auto", "image") and not image_ok:
+        return False
+
+    active_image = anchor_image if image_ok and latent_guide is None else dummy_img
+    original_image = anchor_image if image_ok else active_image
+
+    guide_data["images"].append(active_image)
+    guide_data["original_images"].append(original_image)
+    guide_data["insert_frames"].append(0)
+    guide_data["strengths"].append(_safe_float(anchor_strength, 0.25))
+    guide_data["segment_numbers"].append(-1)
+    guide_data["guide_latents"].append(latent_guide)
+
+    log.info(
+        "[%s] source anchor active mode=%s latent=%s strength=%.3f step=%d every=%d",
+        log_tag,
+        mode,
+        latent_guide is not None,
+        _safe_float(anchor_strength, 0.25),
+        _positive_int(step_index, 1),
+        _positive_int(anchor_every_n_steps, 1),
+    )
+    return True
+
+
 def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_overlap_seconds,
                        frame_rate, audio=None, audio_vae=None, guide_strength=1.0, epsilon=1e-3,
-                       audio_base_px=0, log_tag="LTXAutoExtend"):
+                       audio_base_px=0, log_tag="LTXAutoExtend", anchor_image=None,
+                       anchor_latent=None, anchor_mode="off", anchor_strength=0.25,
+                       anchor_every_n_steps=1, step_index=1):
     """Core of ONE extension pass, shared by LTX Auto Extend (manual chain) and LTX Extend Step
     (loop). Slices the incoming latent's tail as the continuation guide, builds the empty extended
     latent + Director-shaped guide_data, encodes the prompt, and cuts this pass's audio window
@@ -1860,6 +1968,18 @@ def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_ove
         "frame_rate": fps, "timeline_data": "", "start_frame": 0,
         "duration_frames": int(window_px), "resize_method": "maintain aspect ratio",
     }
+    source_anchor_added = _append_source_anchor_guide(
+        guide_data,
+        dummy_img,
+        C,
+        anchor_image=anchor_image,
+        anchor_latent=anchor_latent,
+        anchor_mode=anchor_mode,
+        anchor_strength=anchor_strength,
+        anchor_every_n_steps=anchor_every_n_steps,
+        step_index=step_index,
+        log_tag=log_tag,
+    )
     motion_guide_data = {
         "segments": [], "frame_rate": fps,
         "duration_frames": int(window_px), "resize_method": "maintain aspect ratio",
@@ -1920,6 +2040,7 @@ def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_ove
         "frame_rate": fps, "combined_audio": combined_audio, "remaining_audio": remaining_audio,
         "rel_off_px": tail_start_lat * tsf, "ltxv_length": ltxv_length, "latent_t": latent_t,
         "n_overlap_lat": n_overlap_lat, "window_px": window_px,
+        "source_anchor_added": source_anchor_added,
     }
 
 
