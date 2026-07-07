@@ -1849,6 +1849,16 @@ def _safe_float(value, default=0.0):
     return result if math.isfinite(result) else float(default)
 
 
+def _anchor_strength_for_state(anchor_strength, default=0.25):
+    if anchor_strength is None:
+        return float(default)
+    try:
+        result = float(anchor_strength)
+    except Exception:
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
 def _should_emit_anchor(anchor_mode, anchor_strength, step_index=1, anchor_every_n_steps=1):
     mode = _normalize_anchor_mode(anchor_mode)
     if mode == "off":
@@ -1910,9 +1920,12 @@ def _append_source_anchor_guide(
     if mode in ("auto", "latent"):
         latent_guide = _extract_anchor_latent(anchor_latent, target_channels)
         if latent_guide is None and anchor_latent is not None:
-            log.warning("[%s] source anchor latent is incompatible; falling back to image anchor.", log_tag)
+            if mode == "auto":
+                log.warning("[%s] source anchor latent is incompatible; falling back to image anchor.", log_tag)
+            else:
+                log.warning("[%s] source anchor latent is incompatible; skipping latent anchor.", log_tag)
 
-    if latent_guide is None and mode == "latent" and not image_ok:
+    if latent_guide is None and mode == "latent":
         return False
     if latent_guide is None and mode in ("auto", "image") and not image_ok:
         return False
@@ -2255,7 +2268,7 @@ class LTXExtendInit:
             "frame_rate": fps, "guide_strength": float(guide_strength), "epsilon": float(epsilon),
             "anchor_image": anchor_image, "anchor_latent": anchor_latent,
             "anchor_mode": _normalize_anchor_mode(anchor_mode),
-            "anchor_strength": _safe_float(anchor_strength, 0.25),
+            "anchor_strength": _anchor_strength_for_state(anchor_strength, 0.25),
             "anchor_every_n_steps": _positive_int(anchor_every_n_steps, 1),
         }
         nprompts = len(prompts) if isinstance(prompts, (list, tuple)) else ("text" if prompts else "none")

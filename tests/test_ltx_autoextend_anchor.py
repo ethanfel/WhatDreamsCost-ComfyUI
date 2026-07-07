@@ -253,6 +253,30 @@ def test_build_extend_pass_with_latent_anchor_crops_to_one_frame(ltx_director):
     assert torch.equal(guide_data["guide_latents"][1], anchor_latent["samples"][:, :, :1].clone())
 
 
+def test_build_extend_pass_latent_mode_skips_incompatible_latent_even_with_image(ltx_director):
+    bad_latent = _latent(frames=4, channels=64)
+    anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
+
+    result = ltx_director._build_extend_pass(
+        model=object(),
+        clip=object(),
+        latent=_latent(frames=6),
+        prompt="continue",
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_image=anchor_image,
+        anchor_latent=bad_latent,
+        anchor_mode="latent",
+        anchor_strength=0.25,
+    )
+
+    guide_data = result["guide_data"]
+    assert result["source_anchor_added"] is False
+    assert len(guide_data["images"]) == 1
+    assert len(guide_data["guide_latents"]) == 1
+
+
 @pytest.mark.parametrize(
     "samples",
     [
@@ -365,8 +389,31 @@ def test_extend_init_sanitizes_anchor_state(ltx_director):
     )
 
     assert state["anchor_mode"] == "auto"
-    assert state["anchor_strength"] == 0.25
+    assert state["anchor_strength"] == 0.0
     assert state["anchor_every_n_steps"] == 1
+
+
+def test_extend_step_skips_anchor_after_init_non_finite_strength(ltx_director):
+    anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
+    (state,) = ltx_director.LTXExtendInit().init(
+        seed_latent=_latent(frames=6),
+        model=object(),
+        clip=object(),
+        base_seed=100,
+        prompts=["one"],
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_image=anchor_image,
+        anchor_mode="image",
+        anchor_strength=float("nan"),
+    )
+
+    out = ltx_director.LTXExtendStep().step(state, index=1)
+
+    guide_data = out[4]
+    assert len(guide_data["images"]) == 1
+    assert guide_data["strengths"] == [1.0]
 
 
 def test_extend_step_honors_anchor_every_n_steps(ltx_director):
