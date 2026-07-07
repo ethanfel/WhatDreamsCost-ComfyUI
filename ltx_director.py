@@ -1430,7 +1430,21 @@ class LTXDirector(io.ComfyNode):
                 # model to continue — that's why the decoded video already extends correctly.
                 sibling_latent = _load_sibling_latent(seg, [latent_dir])
                 if sibling_latent is not None:
-                    log.info("[LTXDirector] Using sibling latent for %s", seg.get("imageFile"))
+                    # The sibling .latent is the FULL clip's latent; slice it to the timeline trim
+                    # (trimStart/length are already window-adjusted above) so it matches what the
+                    # decoded-video path sends — otherwise the guide is the START of the clip.
+                    if seg.get("type") == "video":
+                        _tsf = 8  # LTX temporal downscale (8n+1) — same factor used elsewhere here
+                        _n = int(sibling_latent.shape[2])
+                        _ts = min(max(0, int(float(seg.get("trimStart", 0))) // _tsf), max(0, _n - 1))
+                        _ln = max(1, (int(seg.get("length", 1)) + _tsf - 1) // _tsf)
+                        _end = min(_n, _ts + _ln)
+                        if _end > _ts and (_ts > 0 or _end < _n):
+                            sibling_latent = sibling_latent[:, :, _ts:_end]
+                            log.info("[LTXDirector] Trimmed sibling latent to frames %d:%d (timeline trim %s+%spx)",
+                                     _ts, _end, seg.get("trimStart", 0), seg.get("length", 1))
+                    log.info("[LTXDirector] Using sibling latent for %s (%d latent frames)",
+                             seg.get("imageFile"), int(sibling_latent.shape[2]))
 
                 guide_data["images"].append(tensor)
                 guide_data["original_images"].append(original_tensor)
