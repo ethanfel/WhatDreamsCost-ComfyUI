@@ -10,7 +10,7 @@ const STYLE = `
 .ltxrg-wrap { display:flex; flex-direction:column; gap:6px; width:100%; box-sizing:border-box; padding:4px; }
 .ltxrg-view { width:100%; background:#111; border-radius:6px; overflow:hidden; display:flex;
   align-items:center; justify-content:center; min-height:160px; }
-.ltxrg-view img { max-width:100%; max-height:340px; display:block; }
+.ltxrg-view img, .ltxrg-view video { max-width:100%; max-height:340px; display:block; }
 .ltxrg-view.empty::after { content:"idle — queue to review"; color:#666; font:12px monospace; }
 .ltxrg-status { font:12px monospace; color:#bbb; text-align:center; min-height:14px; }
 .ltxrg-btns { display:flex; gap:6px; }
@@ -46,13 +46,45 @@ function keepFullWidth(node, container) {
   } catch (e) { /* ResizeObserver unavailable — width:100% fallback still applies */ }
 }
 
-function renderFrames(ui) {
+function stopMedia(ui) {
   clearInterval(ui.timer);
-  if (!ui.frames || !ui.frames.length) {
-    ui.img.src = "";
-    ui.view.classList.add("empty");
+  ui.timer = null;
+  if (ui.video) { try { ui.video.pause(); } catch (e) {} }
+  if (ui.audio) { try { ui.audio.pause(); } catch (e) {} }
+}
+
+// Prefer a real <video> at the generation fps; play the audio window alongside it. Fall back to the
+// base64 frame slideshow (at the correct fps) only when no video was encoded.
+function showMedia(ui, d) {
+  stopMedia(ui);
+  const fps = Math.max(1, parseFloat(d.fps) || 24);
+
+  if (d.video_url) {
+    ui.view.classList.remove("empty");
+    ui.img.style.display = "none";
+    ui.video.style.display = "block";
+    ui.video.loop = true;
+    ui.video.muted = !!d.audio_url;          // separate audio track -> keep video muted, play the audio el
+    ui.video.src = d.video_url;
+    if (ui.audio) { ui.audio.src = d.audio_url || ""; ui.audio.loop = true; }
+    const play = () => {
+      ui.video.play().catch(() => {});
+      if (d.audio_url && ui.audio) {
+        try { ui.audio.currentTime = ui.video.currentTime || 0; } catch (e) {}
+        ui.audio.play().catch(() => {});
+      }
+    };
+    ui.video.onloadeddata = play;
+    play();
     return;
   }
+
+  // fallback: frame slideshow at the real fps
+  ui.video.style.display = "none";
+  ui.img.style.display = "block";
+  ui.frames = d.frames || [];
+  if (ui.audio) { ui.audio.src = d.audio_url || ""; ui.audio.loop = true; if (d.audio_url) ui.audio.play().catch(() => {}); }
+  if (!ui.frames.length) { ui.img.src = ""; ui.view.classList.add("empty"); return; }
   ui.view.classList.remove("empty");
   ui.idx = 0;
   ui.img.src = ui.frames[0];
@@ -60,7 +92,7 @@ function renderFrames(ui) {
     ui.timer = setInterval(() => {
       ui.idx = (ui.idx + 1) % ui.frames.length;
       ui.img.src = ui.frames[ui.idx];
-    }, 110); // ~9fps looping preview
+    }, 1000 / fps);
   }
 }
 
@@ -92,6 +124,14 @@ function buildUI(node) {
   view.className = "ltxrg-view empty";
   const img = document.createElement("img");
   view.appendChild(img);
+  const video = document.createElement("video");
+  video.playsInline = true;
+  video.controls = true;
+  video.style.display = "none";
+  view.appendChild(video);
+  const audio = document.createElement("audio");
+  audio.style.display = "none";
+  view.appendChild(audio);
   const status = document.createElement("div");
   status.className = "ltxrg-status";
   status.textContent = "idle";
@@ -109,11 +149,11 @@ function buildUI(node) {
   btns.append(pass, reroll, reload);
   wrap.append(view, status, btns);
 
-  const ui = { wrap, view, img, status, buttons: [pass, reroll, reload], frames: [], idx: 0, timer: null };
-  const nid = String(node.id);
-  pass.onclick = () => decide(nid, "pass", ui);
-  reroll.onclick = () => decide(nid, "reroll", ui);
-  reload.onclick = () => decide(nid, "reload", ui);
+  const ui = { wrap, view, img, video, audio, status, buttons: [pass, reroll, reload], frames: [], idx: 0, timer: null };
+  // read node.id FRESH at click — it isn't final at onNodeCreated and the backend keys by the display id
+  pass.onclick = () => decide(String(node.id), "pass", ui);
+  reroll.onclick = () => decide(String(node.id), "reroll", ui);
+  reload.onclick = () => decide(String(node.id), "reload", ui);
   setButtons(ui, false);
   return ui;
 }
@@ -145,7 +185,7 @@ app.registerExtension({
       });
       const onRemoved = this.onRemoved;
       this.onRemoved = function () {
-        clearInterval(ui.timer);
+        stopMedia(ui);
         if (this.__ltxrgRO) { try { this.__ltxrgRO.disconnect(); } catch (e) {} }
         return onRemoved ? onRemoved.apply(this, arguments) : undefined;
       };
@@ -158,9 +198,9 @@ api.addEventListener("ltx_review_show", (e) => {
   const d = e.detail || {};
   const ui = uiForNodeId(d.node_id);
   if (!ui) return;
-  ui.frames = d.frames || [];
-  ui.status.textContent = `attempt ${d.attempt} — review (${ui.frames.length} frames)`;
-  renderFrames(ui);
+  const kind = d.video_url ? "video" : `${(d.frames || []).length} frames`;
+  ui.status.textContent = `attempt ${d.attempt} — review (${kind})`;
+  showMedia(ui, d);
   setButtons(ui, true);
 });
 
@@ -168,7 +208,7 @@ api.addEventListener("ltx_review_done", (e) => {
   const d = e.detail || {};
   const ui = uiForNodeId(d.node_id);
   if (!ui) return;
-  clearInterval(ui.timer);
+  stopMedia(ui);
   setButtons(ui, false);
   ui.status.textContent = "decision: " + (d.action || "?");
 });

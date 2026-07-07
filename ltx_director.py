@@ -2452,6 +2452,62 @@ def _review_preview_frames(images, max_frames=16, quality=70):
     return out
 
 
+def _review_temp_name(key, attempt, ext):
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(key))
+    return f"ltx_review_{safe}_{int(attempt)}.{ext}"
+
+
+def _review_encode_video(images, fps, key, attempt):
+    """Encode the attempt's frames to a temp mp4 at the given fps -> /view URL, so the preview is a real
+    <video> playing at the right speed (not a fixed-rate slideshow). None on failure (JS uses frames)."""
+    if PromptServer is None or folder_paths is None or not hasattr(images, "shape"):
+        return None
+    try:
+        n = int(images.shape[0]); H = int(images.shape[1]); W = int(images.shape[2])
+        if n <= 0:
+            return None
+        W2 = W - (W % 2); H2 = H - (H % 2)  # yuv420p needs even dims
+        fps_i = max(1, int(round(float(fps) or 24)))
+        tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
+        fname = _review_temp_name(key, attempt, "mp4")
+        container = av.open(os.path.join(tmp, fname), mode="w")
+        vs = container.add_stream("libx264", rate=fps_i)
+        vs.width = W2; vs.height = H2; vs.pix_fmt = "yuv420p"
+        for i in range(n):
+            arr = (images[i, :H2, :W2, :3].detach().clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
+            vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(arr), format="rgb24")
+            for pkt in vs.encode(vf):
+                container.mux(pkt)
+        for pkt in vs.encode():
+            container.mux(pkt)
+        container.close()
+        return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+    except Exception as e:
+        log.info("[LTXReviewGate] video encode failed (%s) — using frame slideshow.", e)
+        return None
+
+
+def _review_serve_audio(audio, key, attempt):
+    """Save this pass's audio window to a temp WAV -> /view URL, played alongside the preview video."""
+    if PromptServer is None or folder_paths is None:
+        return None
+    if not (isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor)):
+        return None
+    try:
+        import torchaudio
+        wf = audio["waveform"]
+        if wf.ndim == 3:
+            wf = wf[0]
+        sr = int(audio.get("sample_rate", 44100))
+        tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
+        fname = _review_temp_name(key, attempt, "wav")
+        torchaudio.save(os.path.join(tmp, fname), wf.cpu().float().clamp(-1, 1), sr)
+        return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+    except Exception as e:
+        log.info("[LTXReviewGate] audio preview unavailable (%s)", e)
+        return None
+
+
 class LTXReviewGate:
     """Human-in-the-loop review for the extend retry loop. BLOCKS, plays this attempt's decoded frames
     in the node, and waits for Pass / Reroll / Reload.
@@ -2472,8 +2528,10 @@ class LTXReviewGate:
             "optional": {
                 "attempt": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Optional: the current retry counter (LTX Extend Loop Open 'attempt'), shown in the preview label."}),
                 "auto_pass_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 1.0, "tooltip": "0 = wait forever for a button. >0 = auto-Pass after N seconds (unattended runs)."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.001, "tooltip": "Playback fps for the preview — wire your generation frame_rate so it plays at the right speed."}),
+                "audio": ("AUDIO", {"tooltip": "Optional: this pass's audio window (Step combined_audio). Played in sync with the preview."}),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {"unique_id": "UNIQUE_ID", "dynprompt": "DYNPROMPT"},
         }
 
     RETURN_TYPES = ("STRING", "LATENT")
@@ -2481,16 +2539,28 @@ class LTXReviewGate:
     FUNCTION = "review"
     CATEGORY = "WhatDreamsCost"
 
-    def review(self, images, latent, attempt=0, auto_pass_seconds=0.0, unique_id=None):
+    def review(self, images, latent, attempt=0, auto_pass_seconds=0.0, fps=24.0, audio=None,
+               unique_id=None, dynprompt=None):
+        # Key by the DISPLAY node id, not unique_id: inside the loop's GraphBuilder expansion the node is
+        # cloned with a new id each iteration, but its display id stays the frontend node.id the buttons use.
         key = str(unique_id)
+        if dynprompt is not None:
+            try:
+                key = str(dynprompt.get_display_node_id(str(unique_id)))
+            except Exception:
+                key = str(unique_id)
         ev = threading.Event()
         _review_events[key] = ev
         _review_actions.pop(key, None)
 
-        frames = _review_preview_frames(images)
+        video_url = _review_encode_video(images, fps, key, attempt)
+        audio_url = _review_serve_audio(audio, key, attempt)
+        frames = [] if video_url else _review_preview_frames(images)  # frames only as a fallback
         try:
             PromptServer.instance.send_sync("ltx_review_show",
-                                            {"node_id": key, "frames": frames, "attempt": int(attempt)})
+                                            {"node_id": key, "frames": frames, "attempt": int(attempt),
+                                             "fps": float(fps) if fps else 24.0,
+                                             "video_url": video_url, "audio_url": audio_url})
         except Exception as e:
             log.error("[LTXReviewGate] preview push failed: %s", e)
 
