@@ -544,6 +544,44 @@ def _load_video_tensor(seg: dict, frame_rate: float) -> torch.Tensor:
     frames_np = np.array(frames, dtype=np.float32) / 255.0
     return torch.from_numpy(frames_np)
 
+def _read_latent_tensor(path):
+    """Read a latent tensor [B,C,F,H,W] from a .latent file, tolerant of format:
+    ComfyUI SaveLatent (safetensors with 'latent_tensor') OR a torch-pickled save
+    (raw tensor, {'samples':...}, {'latent_tensor':...}, or {'latent':{'samples':...}})."""
+    # 1) ComfyUI SaveLatent format (safetensors)
+    try:
+        import safetensors.torch
+        data = safetensors.torch.load_file(path, device="cpu")
+        t = data.get("latent_tensor")
+        if t is not None:
+            t = t.to(torch.float32)
+            if "latent_format_version_0" not in data:
+                t = t * (1.0 / 0.18215)  # legacy scaled tensor
+            return t
+        for v in data.values():  # unexpected keys: first 3D+ tensor
+            if isinstance(v, torch.Tensor) and v.dim() >= 3:
+                return v.to(torch.float32)
+        return None
+    except Exception:
+        pass  # not safetensors -> try torch pickle
+    # 2) torch-pickled fallback
+    try:
+        obj = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        obj = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(obj, torch.Tensor):
+        return obj.to(torch.float32)
+    if isinstance(obj, dict):
+        for k in ("latent_tensor", "samples"):
+            v = obj.get(k)
+            if isinstance(v, torch.Tensor):
+                return v.to(torch.float32)
+        lat = obj.get("latent")
+        if isinstance(lat, dict) and isinstance(lat.get("samples"), torch.Tensor):
+            return lat["samples"].to(torch.float32)
+    return None
+
+
 def _load_sibling_latent(seg, extra_dirs=None):
     """If a '<clip>.latent' file exists (next to the clip, in input/output, or in a
     user-provided folder/path in `extra_dirs`), load and return its raw latent tensor
@@ -611,15 +649,11 @@ def _load_sibling_latent(seg, extra_dirs=None):
                  (orig or media), "\n  ".join(candidates))
         return None
     try:
-        import safetensors.torch
-        data = safetensors.torch.load_file(path, device="cpu")
-        t = data.get("latent_tensor")
+        t = _read_latent_tensor(path)
         if t is None:
-            log.warning("[LTXDirector] %s has no 'latent_tensor' (not a ComfyUI .latent file)", path)
+            log.warning("[LTXDirector] %s: no latent tensor found inside (expected a ComfyUI "
+                        "SaveLatent .latent or a torch-saved LATENT).", path)
             return None
-        t = t.to(torch.float32)
-        if "latent_format_version_0" not in data:
-            t = t * (1.0 / 0.18215)  # legacy .latent files stored a scaled tensor
         log.info("[LTXDirector] Loaded sibling latent %s shape=%s", path, tuple(t.shape))
         return t
     except Exception as e:
