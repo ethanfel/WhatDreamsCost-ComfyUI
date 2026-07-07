@@ -305,6 +305,31 @@ def test_build_extend_pass_auto_falls_back_from_bad_latent_to_image(ltx_director
     assert guide_data["guide_latents"][1] is None
 
 
+def test_auto_extend_execute_forwards_manual_anchor_inputs(ltx_director):
+    anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
+
+    out = ltx_director.LTXAutoExtend.execute(
+        model=object(),
+        clip=object(),
+        latent=_latent(frames=6),
+        prompt="continue",
+        seed=123,
+        extension_seconds=1.0,
+        guide_overlap_seconds=0.5,
+        frame_rate=24.0,
+        anchor_image=anchor_image,
+        anchor_mode="image",
+        anchor_strength=0.3,
+    )
+
+    guide_data = out[4]
+    assert len(guide_data["images"]) == 2
+    assert torch.equal(guide_data["images"][1], anchor_image)
+    assert guide_data["strengths"] == [1.0, 0.3]
+    assert guide_data["segment_numbers"] == [0, -1]
+    assert out[9] == 123
+
+
 def test_extend_init_stores_anchor_state(ltx_director):
     anchor_image = torch.ones((1, 64, 96, 3), dtype=torch.float32)
     anchor_latent = _latent(frames=4, start=1000.0)
@@ -326,6 +351,22 @@ def test_extend_init_stores_anchor_state(ltx_director):
     assert state["anchor_mode"] == "auto"
     assert state["anchor_strength"] == 0.3
     assert state["anchor_every_n_steps"] == 2
+
+
+def test_extend_init_sanitizes_anchor_state(ltx_director):
+    (state,) = ltx_director.LTXExtendInit().init(
+        seed_latent=_latent(frames=6),
+        model="model",
+        clip="clip",
+        base_seed=100,
+        anchor_mode=" AUTO ",
+        anchor_strength=float("nan"),
+        anchor_every_n_steps=0,
+    )
+
+    assert state["anchor_mode"] == "auto"
+    assert state["anchor_strength"] == 0.25
+    assert state["anchor_every_n_steps"] == 1
 
 
 def test_extend_step_honors_anchor_every_n_steps(ltx_director):
