@@ -2249,6 +2249,7 @@ class LTXExtendInit:
                 "anchor_mode": (["off", "auto", "image", "latent"], {"default": "off", "tooltip": "'off' preserves old behavior. 'auto' prefers latent then image."}),
                 "anchor_strength": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Weak source-anchor guide strength. Recommended range: 0.15-0.35."}),
                 "anchor_every_n_steps": ("INT", {"default": 1, "min": 1, "max": 100000, "step": 1, "tooltip": "Emit the source anchor every N extension steps. 1 = every step."}),
+                "combine_global": ("BOOLEAN", {"default": False, "tooltip": "ON: global_prompt is prepended to EVERY step ('<global>, <step>') as a shared style; a blank step becomes just the global. OFF: global is only a fallback for blank steps. (Kept last so it never shifts other widgets.)"}),
             },
         }
 
@@ -2261,12 +2262,13 @@ class LTXExtendInit:
              audio=None, audio_vae=None, extension_seconds=12.0, guide_overlap_seconds=3.0,
              frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, resume_from_seconds=-1.0,
              anchor_image=None, anchor_latent=None, anchor_mode="off", anchor_strength=0.25,
-             anchor_every_n_steps=1):
+             anchor_every_n_steps=1, combine_global=False):
         fps = float(frame_rate) if frame_rate else 24.0
         abs_pos_px = 0 if (resume_from_seconds is None or float(resume_from_seconds) < 0) else int(round(float(resume_from_seconds) * fps))
         state = {
             "model": model, "clip": clip, "audio_vae": audio_vae, "master_audio": audio,
             "prompts": prompts, "global_prompt": global_prompt or "", "base_seed": int(base_seed),
+            "combine_global": bool(combine_global),
             "latent": seed_latent, "abs_pos_px": abs_pos_px,
             "extension_seconds": float(extension_seconds), "guide_overlap_seconds": float(guide_overlap_seconds),
             "frame_rate": fps, "guide_strength": float(guide_strength), "epsilon": float(epsilon),
@@ -2309,7 +2311,14 @@ class LTXExtendStep:
         st = state or {}
         idx = int(index)
         prompt_src = prompts if prompts is not None else st.get("prompts")
-        prompt = _pick_prompt(prompt_src, st.get("global_prompt", ""), idx)
+        gp = str(st.get("global_prompt", "")).strip()
+        raw = _pick_prompt(prompt_src, gp, idx)
+        # combine_global ON -> global is a shared prefix on every step ("<global>, <step>"); a blank
+        # step becomes just the global. OFF -> global stays a fallback only (raw unchanged).
+        if bool(st.get("combine_global", False)) and gp and raw and raw != gp:
+            prompt = gp + ", " + raw
+        else:
+            prompt = raw
         seed = (int(st.get("base_seed", 0)) + idx + int(seed_offset)) & 0xffffffffffffffff
         fps = float(st.get("frame_rate", 24.0)) or 24.0
         r = _build_extend_pass(

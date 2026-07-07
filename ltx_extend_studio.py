@@ -147,6 +147,7 @@ class LTXExtendPromptStudio:
                 "guide_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "epsilon": ("FLOAT", {"default": 1e-3, "min": 0.0, "max": 1.0, "step": 1e-4}),
                 "prompts_json": ("STRING", {"default": "", "multiline": False, "tooltip": "Authored per-step prompts (managed by the Studio UI)."}),
+                "combine_global": ("BOOLEAN", {"default": False, "tooltip": "ON: global_prompt is prepended to EVERY step ('<global>, <step>') as a shared style; a blank step becomes just the global. OFF: global is only a fallback for blank steps."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -158,7 +159,7 @@ class LTXExtendPromptStudio:
 
     def build(self, seed_latent, model, clip, master_audio, total, base_seed,
               audio_vae=None, global_prompt="", extension_seconds=12.0, guide_overlap_seconds=3.0,
-              frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, prompts_json="", unique_id=None):
+              frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, prompts_json="", combine_global=False, unique_id=None):
         fps = float(frame_rate) if frame_rate else 24.0
         seed_frames = int(seed_latent["samples"].shape[2]) if isinstance(seed_latent, dict) else 1
         segments = _extend_segments(seed_frames, extension_seconds, guide_overlap_seconds, fps, total)
@@ -167,6 +168,7 @@ class LTXExtendPromptStudio:
         state = {
             "model": model, "clip": clip, "audio_vae": audio_vae, "master_audio": master_audio,
             "prompts": prompts, "global_prompt": global_prompt or "", "base_seed": int(base_seed),
+            "combine_global": bool(combine_global),
             "latent": seed_latent, "abs_pos_px": 0,
             "extension_seconds": float(extension_seconds), "guide_overlap_seconds": float(guide_overlap_seconds),
             "frame_rate": fps, "guide_strength": float(guide_strength), "epsilon": float(epsilon),
@@ -196,8 +198,8 @@ class LTXTimelineToExtendPrompts:
             },
         }
 
-    RETURN_TYPES = (_STUDIO_ANY, "AUDIO", "STRING", "INT")
-    RETURN_NAMES = ("prompts", "master_audio", "prompts_text", "count")
+    RETURN_TYPES = (_STUDIO_ANY, "AUDIO", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("prompts", "master_audio", "global_prompt", "prompts_text", "count")
     FUNCTION = "adapt"
     CATEGORY = "WhatDreamsCost"
 
@@ -207,10 +209,11 @@ class LTXTimelineToExtendPrompts:
         # Director joins per-segment prompts with " | " in timeline order; blanks stay (the extend
         # Init/Step falls back to global_prompt for an empty step).
         prompts = [p.strip() for p in raw.split("|")] if raw.strip() else []
+        gp = str(gd.get("global_prompt", "") or "")  # the Director's global -> wire into Init/Studio.global_prompt
         text = "\n".join(prompts)
-        log.info("[LTXTimelineToExtendPrompts] %d prompts from timeline; master_audio=%s",
-                 len(prompts), "yes" if combined_audio is not None else "none")
-        return (prompts, combined_audio, text, len(prompts))
+        log.info("[LTXTimelineToExtendPrompts] %d prompts from timeline; global=%r; master_audio=%s",
+                 len(prompts), (gp[:40] + "...") if len(gp) > 40 else gp, "yes" if combined_audio is not None else "none")
+        return (prompts, combined_audio, gp, text, len(prompts))
 
 
 STUDIO_NODE_CLASS_MAPPINGS = {
