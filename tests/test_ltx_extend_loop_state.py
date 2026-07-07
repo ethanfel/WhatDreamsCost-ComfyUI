@@ -25,6 +25,9 @@ def test_fold_latent_preserves_anchor_fields():
 
     folded = ltx_extend_loop._fold_latent(state, passed_latent)
 
+    assert folded is not state
+    assert state["latent"] is not passed_latent
+    assert state["abs_pos_px"] == 0
     assert folded["latent"] is passed_latent
     assert folded["anchor_image"] is anchor_image
     assert folded["anchor_latent"] is anchor_latent
