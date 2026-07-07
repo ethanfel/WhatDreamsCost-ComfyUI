@@ -2530,6 +2530,7 @@ class LTXReviewGate:
                 "auto_pass_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 1.0, "tooltip": "0 = wait forever for a button. >0 = auto-Pass after N seconds (unattended runs)."}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.001, "tooltip": "Playback fps for the preview — wire your generation frame_rate so it plays at the right speed."}),
                 "audio": ("AUDIO", {"tooltip": "Optional: this pass's audio window (Step combined_audio). Played in sync with the preview."}),
+                "passthrough": ("BOOLEAN", {"default": False, "tooltip": "ON: use the gate as a PREVIEW only — show the video but never block; always 'pass' so the loop runs unattended. OFF: block and wait for Pass / Reroll / Reload."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "dynprompt": "DYNPROMPT"},
         }
@@ -2540,7 +2541,7 @@ class LTXReviewGate:
     CATEGORY = "WhatDreamsCost"
 
     def review(self, images, latent, attempt=0, auto_pass_seconds=0.0, fps=24.0, audio=None,
-               unique_id=None, dynprompt=None):
+               passthrough=False, unique_id=None, dynprompt=None):
         # Key by the DISPLAY node id, not unique_id: inside the loop's GraphBuilder expansion the node is
         # cloned with a new id each iteration, but its display id stays the frontend node.id the buttons use.
         key = str(unique_id)
@@ -2549,10 +2550,8 @@ class LTXReviewGate:
                 key = str(dynprompt.get_display_node_id(str(unique_id)))
             except Exception:
                 key = str(unique_id)
-        ev = threading.Event()
-        _review_events[key] = ev
-        _review_actions.pop(key, None)
 
+        # Always push the preview (video + audio) to the node.
         video_url = _review_encode_video(images, fps, key, attempt)
         audio_url = _review_serve_audio(audio, key, attempt)
         frames = [] if video_url else _review_preview_frames(images)  # frames only as a fallback
@@ -2560,11 +2559,20 @@ class LTXReviewGate:
             PromptServer.instance.send_sync("ltx_review_show",
                                             {"node_id": key, "frames": frames, "attempt": int(attempt),
                                              "fps": float(fps) if fps else 24.0,
-                                             "video_url": video_url, "audio_url": audio_url})
+                                             "video_url": video_url, "audio_url": audio_url,
+                                             "passthrough": bool(passthrough)})
         except Exception as e:
             log.error("[LTXReviewGate] preview push failed: %s", e)
 
-        # Block the worker thread until a button arrives (or auto-pass / user interrupt).
+        # Passthrough: use the gate purely as a preview — never block, always pass.
+        if passthrough:
+            log.info("[LTXReviewGate] passthrough -> preview only, auto-pass (attempt %s)", int(attempt))
+            return ("pass", latent)
+
+        # Otherwise block the worker thread until a button arrives (or auto-pass / user interrupt).
+        ev = threading.Event()
+        _review_events[key] = ev
+        _review_actions.pop(key, None)
         waited = 0.0
         while not ev.wait(timeout=0.5):
             comfy.model_management.throw_exception_if_processing_interrupted()

@@ -199,9 +199,14 @@ api.addEventListener("ltx_review_show", (e) => {
   const ui = uiForNodeId(d.node_id);
   if (!ui) return;
   const kind = d.video_url ? "video" : `${(d.frames || []).length} frames`;
-  ui.status.textContent = `attempt ${d.attempt} — review (${kind})`;
   showMedia(ui, d);
-  setButtons(ui, true);
+  if (d.passthrough) {
+    setButtons(ui, false);   // preview only — the run doesn't wait for a decision
+    ui.status.textContent = `attempt ${d.attempt} — preview (${kind}, passthrough)`;
+  } else {
+    setButtons(ui, true);
+    ui.status.textContent = `attempt ${d.attempt} — review (${kind})`;
+  }
 });
 
 api.addEventListener("ltx_review_done", (e) => {
