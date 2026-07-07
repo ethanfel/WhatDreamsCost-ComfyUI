@@ -84,6 +84,8 @@ Directly pasting the original keyframe into the generated latent window would be
 
 `LTXExtendStep` reads the anchor state and decides whether to emit the source anchor for the current loop index.
 
+The branch now also includes the native `LTXExtendLoopOpen` / `LTXExtendLoopClose` nodes in `ltx_extend_loop.py`. These nodes carry the same `LTX_EXTEND_STATE` value produced by `LTXExtendInit` and consumed by `LTXExtendStep`. They do not need separate anchor inputs; they only preserve and fold state. The implementation should avoid duplicating anchor logic in the loop Open/Close nodes.
+
 `anchor_every_n_steps` defaults to `1`. Setting it to `2` or higher can reduce conditioning pressure and token cost for very long runs.
 
 ## Guide Construction
@@ -129,6 +131,7 @@ Values above `0.5` should be treated as experimental. A strong original-frame an
 The implementation must not change:
 
 - Output count or output types for existing nodes unless optional inputs are appended.
+- Native loop Open/Close control-flow behavior.
 - The meaning of `extension_seconds`.
 - The overlap math.
 - The audio window math.
@@ -164,6 +167,7 @@ Add focused tests around `_build_extend_pass()` and loop state handling:
 - Active image anchor adds a second guide entry with strength `anchor_strength`.
 - Active latent anchor adds a second `guide_latents` entry.
 - `anchor_every_n_steps` emits anchors only on expected loop indices.
+- Native `LTXExtendLoopOpen` / `LTXExtendLoopClose` preserve anchor fields as part of the carried state.
 - Invalid or missing anchor inputs fall back cleanly.
 - The number of real latent frames before crop remains the expected extension window length.
 
