@@ -6,6 +6,7 @@ from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
 from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect, LTXReviewGate
 from .ltx_extend_loop import LOOP_NODE_CLASS_MAPPINGS, LOOP_NODE_DISPLAY_NAME_MAPPINGS
+from .ltx_extend_studio import STUDIO_NODE_CLASS_MAPPINGS, STUDIO_NODE_DISPLAY_NAME_MAPPINGS
 from .ltx_director_guide import LTXDirectorGuide, LTXDirectorCropGuides, LTXICLoraSelector
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
@@ -41,6 +42,7 @@ NODE_CLASS_MAPPINGS = {
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
     "LTXICLoraSelector": LTXICLoraSelector,
     **LOOP_NODE_CLASS_MAPPINGS,
+    **STUDIO_NODE_CLASS_MAPPINGS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -61,6 +63,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LTXDirectorCropGuides": "LTX Director Crop Guides",
     "LTXICLoraSelector": "LTX IC-LoRA Selector",
     **LOOP_NODE_DISPLAY_NAME_MAPPINGS,
+    **STUDIO_NODE_DISPLAY_NAME_MAPPINGS,
 }
 
 WEB_DIRECTORY = "./js"
