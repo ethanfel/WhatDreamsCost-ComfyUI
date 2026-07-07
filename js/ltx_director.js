@@ -12444,6 +12444,10 @@ app.registerExtension({
         const container = document.createElement("div");
 
         container.style.boxSizing = "border-box";
+        // Clip the timeline UI to the node's allocated widget box so content never spills outside the
+        // node frame. Safe: the pop-up menus (.pr-gap-menu, overlays) are position:fixed + appended to
+        // document.body, so they are not children here and stay unclipped.
+        container.style.overflow = "hidden";
         const widget = this.addDOMWidget("timeline_ui", "timeline_ui", container, {
           getValue: () => "",
           setValue: () => { },
