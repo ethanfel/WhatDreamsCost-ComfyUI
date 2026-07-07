@@ -2250,20 +2250,20 @@ class LTXReviewGate:
             "required": {
                 "images": ("IMAGE", {"tooltip": "The decoded frames of THIS attempt (VAE decode of the pass's latent)."}),
                 "latent": ("LATENT", {"tooltip": "This attempt's latent (passed through on Pass)."}),
-                "attempt": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Seed-rotation counter carried by the While Loop (start 0)."}),
             },
             "optional": {
+                "attempt": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "forceInput": True, "tooltip": "Optional: the current retry counter (LTX Extend Loop Open 'attempt'), shown in the preview label."}),
                 "auto_pass_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 1.0, "tooltip": "0 = wait forever for a button. >0 = auto-Pass after N seconds (unattended runs)."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("BOOLEAN", "LATENT", "INT")
-    RETURN_NAMES = ("continue", "latent", "attempt")
+    RETURN_TYPES = ("STRING", "LATENT")
+    RETURN_NAMES = ("decision", "latent")
     FUNCTION = "review"
     CATEGORY = "WhatDreamsCost"
 
-    def review(self, images, latent, attempt, auto_pass_seconds=0.0, unique_id=None):
+    def review(self, images, latent, attempt=0, auto_pass_seconds=0.0, unique_id=None):
         key = str(unique_id)
         ev = threading.Event()
         _review_events[key] = ev
@@ -2292,14 +2292,10 @@ class LTXReviewGate:
         except Exception:
             pass
 
-        if action == "reroll":
-            log.info("[LTXReviewGate] REROLL -> attempt %d (new seed), redo step", int(attempt) + 1)
-            return (True, latent, int(attempt) + 1)
-        if action == "reload":
-            log.info("[LTXReviewGate] RELOAD -> redo step (Step re-pulls its live prompts input)")
-            return (True, latent, int(attempt))
-        log.info("[LTXReviewGate] PASS -> exit retry loop, continue")
-        return (False, latent, int(attempt))
+        # decision string is consumed by LTX Extend Loop Close: reroll -> attempt+1 + redo step;
+        # reload -> redo step (Step re-pulls its live prompts); pass -> fold latent + advance.
+        log.info("[LTXReviewGate] decision=%s (attempt %s)", action, int(attempt))
+        return (action, latent)
 
 
 NODE_CLASS_MAPPINGS = {
