@@ -1825,6 +1825,196 @@ class LTXKeyframeOut(io.ComfyNode):
         return io.NodeOutput(original, resized, seg_no, ins, count)
 
 
+class LTXAutoExtend(io.ComfyNode):
+    """Headless one-pass video extender for the LTX Director chain.
+
+    Sits between one generation's final (second-sampler) latent and the next pass's
+    sampler: it takes the TAIL of the incoming latent as a continuation guide — fed
+    straight through the Guide's append_keyframe path (no VAE re-encode, max quality) —
+    and emits outputs shaped exactly like LTX Director, so your existing Guide + samplers
+    keep working unchanged. Chain N of these (each with its own prompt/seed) to build a
+    long clip. Audio self-threads: feed the master audio into pass 1; each node uses its
+    (overlap + extension) window and passes the remainder out to the next node.
+
+    The overlap region is regenerated each pass (it's the frozen continuation guide); crop
+    it off the front when you stitch the pass outputs — same manual step as before."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXAutoExtend",
+            display_name="LTX Auto Extend",
+            category="WhatDreamsCost",
+            description=(
+                "Automate the manual reinsert->trim->prompt loop for iterative extension. Takes "
+                "the previous pass's latent, reuses its last 'guide_overlap_seconds' as the "
+                "continuation guide (no re-encode), and outputs Director-shaped model/positive/"
+                "latent/guide_data/audio for the next Guide + sampler. Audio self-threads pass to pass."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip"),
+                io.Latent.Input(
+                    "latent",
+                    tooltip="The previous pass's final (second-sampler) video latent to continue from.",
+                ),
+                io.String.Input(
+                    "prompt", multiline=True, default="",
+                    tooltip="Prompt for THIS extension beat.",
+                ),
+                io.Int.Input(
+                    "seed", default=0, min=0, max=0xffffffffffffffff, step=1,
+                    tooltip="Seed for this extension. Passed through on the 'seed' output — wire it into your sampler's noise seed.",
+                ),
+                io.Float.Input(
+                    "extension_seconds", default=12.0, min=0.1, max=600.0, step=0.1,
+                    tooltip="How many NEW seconds to generate this pass.",
+                ),
+                io.Float.Input(
+                    "guide_overlap_seconds", default=3.0, min=0.1, max=60.0, step=0.1,
+                    tooltip="How much of the incoming latent's TAIL to reuse as the continuation guide (the overlap you crop when stitching).",
+                ),
+                io.Float.Input(
+                    "frame_rate", default=24.0, min=1.0, max=120.0, step=0.001,
+                    tooltip="Timeline fps — match your generation.",
+                ),
+                io.Audio.Input(
+                    "audio", optional=True,
+                    tooltip="Master audio (pass 1, aligned so it starts at this pass's overlap point) or the previous node's remaining_audio. This pass uses the front (overlap+extension) window.",
+                ),
+                io.Vae.Input(
+                    "audio_vae", optional=True,
+                    tooltip="Optional Audio VAE. When connected, builds a preserve-masked audio_latent for the window (fixed audio drives the video). Leave unconnected to just pass the audio window through.",
+                ),
+                io.Float.Input(
+                    "guide_strength", default=1.0, min=0.0, max=1.0, step=0.01, optional=True,
+                    tooltip="Keyframe strength for the continuation guide.",
+                ),
+                io.Float.Input(
+                    "epsilon", default=1e-3, min=0.0, max=1.0, step=1e-4, optional=True,
+                ),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                io.Conditioning.Output(display_name="positive"),
+                io.Latent.Output(display_name="video_latent"),
+                io.Latent.Output(display_name="audio_latent"),
+                GuideData.Output(display_name="guide_data"),
+                MotionGuideData.Output(display_name="motion_guide_data"),
+                io.Float.Output(display_name="frame_rate"),
+                io.Audio.Output(display_name="combined_audio", tooltip="This pass's audio window (overlap+extension)."),
+                io.Audio.Output(display_name="remaining_audio", tooltip="Audio advanced by extension_seconds — wire to the next LTX Auto Extend."),
+                io.Int.Output(display_name="seed"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, clip, latent, prompt="", seed=0, extension_seconds=12.0,
+                guide_overlap_seconds=3.0, frame_rate=24.0, audio=None, audio_vae=None,
+                guide_strength=1.0, epsilon=1e-3) -> io.NodeOutput:
+        fps = float(frame_rate) if frame_rate else 24.0
+        tsf = 8  # LTX temporal downscale (8n+1)
+        target_sr = 44100
+
+        # --- Slice the incoming latent's TAIL as the continuation guide ---
+        in_samples = latent["samples"]
+        C = int(in_samples.shape[1])
+        T_in = int(in_samples.shape[2])
+        Hl = int(in_samples.shape[3])
+        Wl = int(in_samples.shape[4])
+        overlap_px = max(1, int(round(float(guide_overlap_seconds) * fps)))
+        ext_px = max(1, int(round(float(extension_seconds) * fps)))
+        n_overlap_lat = max(1, min(T_in, (overlap_px + tsf - 1) // tsf))
+        tail_latent = in_samples[0:1, :, T_in - n_overlap_lat:, :, :].clone()
+
+        # --- Empty extended latent (overlap + extension), on the 8n+1 grid ---
+        window_px = overlap_px + ext_px
+        ltxv_length = int(math.ceil((window_px - 1) / 8.0) * 8) + 1
+        latent_t = ((ltxv_length - 1) // 8) + 1
+        empty = torch.zeros(
+            [1, C, latent_t, Hl, Wl],
+            device=comfy.model_management.intermediate_device(),
+        )
+        video_latent = {"samples": empty}
+
+        # --- guide_data, shaped exactly like LTX Director (tail latent as the guide) ---
+        dummy_img = torch.zeros((1, Hl * 32, Wl * 32, 3), dtype=torch.float32)
+        guide_data = {
+            "images": [dummy_img],
+            "original_images": [dummy_img],
+            "insert_frames": [0],
+            "strengths": [float(guide_strength)],
+            "segment_numbers": [0],
+            "guide_latents": [tail_latent],
+            "frame_rate": fps,
+            "timeline_data": "",
+            "start_frame": 0,
+            "duration_frames": int(window_px),
+            "resize_method": "maintain aspect ratio",
+        }
+        motion_guide_data = {
+            "segments": [], "frame_rate": fps,
+            "duration_frames": int(window_px), "resize_method": "maintain aspect ratio",
+        }
+
+        # --- positive conditioning + patched model (single prompt = no per-segment masking) ---
+        patched, conditioning = _encode_relay(model, clip, video_latent, prompt or "", "", "", float(epsilon))
+
+        # --- Audio: use this pass's window, thread the remainder onward ---
+        def _empty_audio(nsamp):
+            return {"waveform": torch.zeros((1, 2, max(1, nsamp)), dtype=torch.float32), "sample_rate": target_sr}
+
+        if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
+            wf = audio["waveform"]
+            if wf.ndim == 2:
+                wf = wf.unsqueeze(0)
+            sr = int(audio.get("sample_rate", target_sr))
+            win_s = max(1, int(round(window_px / fps * sr)))   # window matches the video length
+            adv_s = max(1, int(round(ext_px / fps * sr)))      # advance by the NEW portion only
+            win = wf[..., :win_s]
+            if win.shape[-1] < win_s:  # pad the tail pass if the audio runs short
+                pad = torch.zeros((*win.shape[:-1], win_s - win.shape[-1]), dtype=win.dtype, device=win.device)
+                win = torch.cat([win, pad], dim=-1)
+            combined_audio = {"waveform": win.contiguous(), "sample_rate": sr}
+            rem = wf[..., adv_s:]
+            if rem.shape[-1] <= 0:
+                rem = torch.zeros((*wf.shape[:-1], 1), dtype=wf.dtype, device=wf.device)
+            remaining_audio = {"waveform": rem.contiguous(), "sample_rate": sr}
+        else:
+            win_samples = int(round(window_px / fps * target_sr))
+            combined_audio = _empty_audio(win_samples)
+            remaining_audio = _empty_audio(1)
+
+        # --- audio_latent: preserve the fixed audio (zeros mask) when an Audio VAE is wired ---
+        audio_latent = {}
+        if audio_vae is not None:
+            try:
+                waveform = combined_audio["waveform"]
+                if waveform.ndim == 2:
+                    waveform = waveform.unsqueeze(0)
+                if hasattr(audio_vae, "first_stage_model"):
+                    latent_samples = audio_vae.encode(waveform.movedim(1, -1))
+                else:
+                    latent_samples = audio_vae.encode({"waveform": waveform, "sample_rate": combined_audio["sample_rate"]})
+                Bc, Cc, F_len, H_len = latent_samples.shape
+                mask = torch.zeros((Bc, F_len, H_len), dtype=torch.float32, device=latent_samples.device)
+                audio_latent = {"samples": latent_samples, "type": "audio", "noise_mask": mask}
+                log.info("[LTXAutoExtend] Built preserve-masked audio_latent %s.", tuple(latent_samples.shape))
+            except Exception as e:
+                log.error("[LTXAutoExtend] audio_latent build failed (%s) — leaving it empty.", e)
+                audio_latent = {}
+
+        log.info(
+            "[LTXAutoExtend] guide tail=%d latent frames (~%.2fs) -> window %d px (%d latent), +%.2fs new, seed=%d",
+            n_overlap_lat, guide_overlap_seconds, window_px, latent_t, extension_seconds, int(seed),
+        )
+
+        return io.NodeOutput(
+            patched, conditioning, video_latent, audio_latent, guide_data,
+            motion_guide_data, fps, combined_audio, remaining_audio, int(seed),
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "LTXDirector": LTXDirector,
     "LTXKeyframeOut": LTXKeyframeOut,

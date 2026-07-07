@@ -4,7 +4,7 @@ from .ltx_sequencer import LTXSequencer
 from .speech_length_calculator import SpeechLengthCalculator
 from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
-from .ltx_director import LTXDirector, LTXKeyframeOut
+from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend
 from .ltx_director_guide import LTXDirectorGuide, LTXDirectorCropGuides, LTXICLoraSelector
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
@@ -15,7 +15,8 @@ class PromptRelay(ComfyExtension):
         return [
             LTXDirector,
             LTXDirectorGuide,
-            LTXKeyframeOut
+            LTXKeyframeOut,
+            LTXAutoExtend
         ]
 
 async def comfy_entrypoint() -> PromptRelay:
@@ -30,6 +31,7 @@ NODE_CLASS_MAPPINGS = {
     "LoadVideoUI": LoadVideoUI,
     "LTXDirector": LTXDirector,
     "LTXKeyframeOut": LTXKeyframeOut,
+    "LTXAutoExtend": LTXAutoExtend,
     "LTXDirectorGuide": LTXDirectorGuide,
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
     "LTXICLoraSelector": LTXICLoraSelector,
@@ -44,6 +46,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadVideoUI": "Load Video UI",
     "LTXDirector": "LTX Director",
     "LTXKeyframeOut": "LTX Keyframe Out",
+    "LTXAutoExtend": "LTX Auto Extend",
     "LTXDirectorGuide": "LTX Director Guide",
     "LTXDirectorCropGuides": "LTX Director Crop Guides",
     "LTXICLoraSelector": "LTX IC-LoRA Selector",
