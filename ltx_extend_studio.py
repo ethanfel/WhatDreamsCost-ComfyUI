@@ -140,6 +140,7 @@ class LTXExtendPromptStudio:
             },
             "optional": {
                 "audio_vae": ("VAE", {"tooltip": "Audio VAE -> per-pass preserve-masked audio_latent for lipsync."}),
+                "vae": ("VAE", {"tooltip": "Optional VIDEO VAE (hybrid guide). Connected -> guide tail decoded to images -> image path (sharp resize under scale_by). Empty -> raw latent guide."}),
                 "global_prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "Fallback prompt for any step left blank in the studio."}),
                 "extension_seconds": ("FLOAT", {"default": 12.0, "min": 0.1, "max": 600.0, "step": 0.1}),
                 "guide_overlap_seconds": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 60.0, "step": 0.1}),
@@ -158,7 +159,7 @@ class LTXExtendPromptStudio:
     CATEGORY = "WhatDreamsCost"
 
     def build(self, seed_latent, model, clip, master_audio, total, base_seed,
-              audio_vae=None, global_prompt="", extension_seconds=12.0, guide_overlap_seconds=3.0,
+              audio_vae=None, vae=None, global_prompt="", extension_seconds=12.0, guide_overlap_seconds=3.0,
               frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, prompts_json="", combine_global=False, unique_id=None):
         fps = float(frame_rate) if frame_rate else 24.0
         seed_frames = int(seed_latent["samples"].shape[2]) if isinstance(seed_latent, dict) else 1
@@ -166,7 +167,7 @@ class LTXExtendPromptStudio:
         prompts = _parse_prompts_json(prompts_json, total)
 
         state = {
-            "model": model, "clip": clip, "audio_vae": audio_vae, "master_audio": master_audio,
+            "model": model, "clip": clip, "audio_vae": audio_vae, "vae": vae, "master_audio": master_audio,
             "prompts": prompts, "global_prompt": global_prompt or "", "base_seed": int(base_seed),
             "combine_global": bool(combine_global),
             "latent": seed_latent, "abs_pos_px": 0,

@@ -1957,7 +1957,7 @@ def _append_source_anchor_guide(
 
 
 def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_overlap_seconds,
-                       frame_rate, audio=None, audio_vae=None, guide_strength=1.0, epsilon=1e-3,
+                       frame_rate, audio=None, audio_vae=None, vae=None, guide_strength=1.0, epsilon=1e-3,
                        audio_base_px=0, log_tag="LTXAutoExtend", anchor_image=None,
                        anchor_latent=None, anchor_mode="off", anchor_strength=0.25,
                        anchor_every_n_steps=1, step_index=1):
@@ -1986,9 +1986,31 @@ def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_ove
     video_latent = {"samples": empty}
 
     dummy_img = torch.zeros((1, Hl * 32, Wl * 32, 3), dtype=torch.float32)
+    # Guide source: raw tail latent by default (sharpest when the working res matches). If a video VAE
+    # is provided (HYBRID), decode the tail to images and feed the image-guide path instead — the Guide
+    # resizes PIXELS then re-encodes at the working res, which stays sharp under scale_by, vs.
+    # bilinear-resizing the latent (decodes soft/blurry). One VAE round-trip on the ~overlap frames, no mp4.
+    guide_img = dummy_img
+    guide_lat = tail_latent
+    if vae is not None:
+        try:
+            dec = vae.decode(tail_latent)
+            if hasattr(dec, "ndim") and dec.ndim == 5:  # [B,T,H,W,C] -> [B*T,H,W,C]
+                _b, _t, _h, _w, _c = dec.shape
+                dec = dec.reshape(_b * _t, _h, _w, _c)
+            if hasattr(dec, "ndim") and dec.ndim == 4 and int(dec.shape[-1]) >= 3:
+                guide_img = dec[..., :3].to(torch.float32)
+                guide_lat = None  # -> Guide uses the image path (sharp resize + re-encode)
+                log.info("[%s] hybrid guide: decoded tail -> %d image(s) (image-path resize, no latent blur)",
+                         log_tag, int(guide_img.shape[0]))
+            else:
+                log.warning("[%s] guide decode gave shape %s — keeping raw latent guide.",
+                            log_tag, tuple(getattr(dec, "shape", ())))
+        except Exception as e:
+            log.error("[%s] guide decode failed (%s) — keeping raw latent guide.", log_tag, e)
     guide_data = {
-        "images": [dummy_img], "original_images": [dummy_img], "insert_frames": [0],
-        "strengths": [float(guide_strength)], "segment_numbers": [0], "guide_latents": [tail_latent],
+        "images": [guide_img], "original_images": [guide_img], "insert_frames": [0],
+        "strengths": [float(guide_strength)], "segment_numbers": [0], "guide_latents": [guide_lat],
         "frame_rate": fps, "timeline_data": "", "start_frame": 0,
         "duration_frames": int(window_px), "resize_method": "maintain aspect ratio",
     }
@@ -2129,6 +2151,10 @@ class LTXAutoExtend(io.ComfyNode):
                     "audio_vae", optional=True,
                     tooltip="Optional Audio VAE. When connected, builds a preserve-masked audio_latent for the window (fixed audio drives the video). Leave unconnected to just pass the audio window through.",
                 ),
+                io.Vae.Input(
+                    "vae", optional=True,
+                    tooltip="Optional VIDEO VAE (hybrid guide). When connected, the guide tail is decoded to images and fed through the image path (sharp resize + re-encode at the working res) instead of the raw latent — fixes the blurry guide under scale_by. Leave unconnected to use the raw latent (sharpest at native res).",
+                ),
                 io.Float.Input(
                     "guide_strength", default=1.0, min=0.0, max=1.0, step=0.01, optional=True,
                     tooltip="Keyframe strength for the continuation guide.",
@@ -2169,13 +2195,13 @@ class LTXAutoExtend(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, clip, latent, prompt="", seed=0, extension_seconds=12.0,
-                guide_overlap_seconds=3.0, frame_rate=24.0, audio=None, audio_vae=None,
+                guide_overlap_seconds=3.0, frame_rate=24.0, audio=None, audio_vae=None, vae=None,
                 guide_strength=1.0, epsilon=1e-3, anchor_image=None, anchor_latent=None,
                 anchor_mode="off", anchor_strength=0.25) -> io.NodeOutput:
         # Manual chain: the fed audio starts at the incoming latent's frame 0, so audio_base_px = 0.
         r = _build_extend_pass(
             model, clip, latent, prompt, extension_seconds, guide_overlap_seconds, frame_rate,
-            audio=audio, audio_vae=audio_vae, guide_strength=guide_strength, epsilon=epsilon,
+            audio=audio, audio_vae=audio_vae, vae=vae, guide_strength=guide_strength, epsilon=epsilon,
             audio_base_px=0, log_tag="LTXAutoExtend", anchor_image=anchor_image,
             anchor_latent=anchor_latent, anchor_mode=anchor_mode, anchor_strength=anchor_strength,
         )
@@ -2238,6 +2264,7 @@ class LTXExtendInit:
                 "global_prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "Fallback prompt for steps with no list entry."}),
                 "audio": ("AUDIO", {"tooltip": "Full master audio, aligned to the seed's start. The loop auto-cuts each pass's window; no manual pre-cut."}),
                 "audio_vae": ("VAE", {"tooltip": "Audio VAE -> per-pass preserve-masked audio_latent for lipsync."}),
+                "vae": ("VAE", {"tooltip": "Optional VIDEO VAE (hybrid guide). Connected -> the guide tail is decoded to images and fed through the image path (sharp resize under scale_by) instead of the raw latent. Leave empty to use the raw latent."}),
                 "extension_seconds": ("FLOAT", {"default": 12.0, "min": 0.1, "max": 600.0, "step": 0.1}),
                 "guide_overlap_seconds": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 60.0, "step": 0.1}),
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.001}),
@@ -2259,7 +2286,7 @@ class LTXExtendInit:
     CATEGORY = "WhatDreamsCost"
 
     def init(self, seed_latent, model, clip, base_seed, prompts=None, global_prompt="",
-             audio=None, audio_vae=None, extension_seconds=12.0, guide_overlap_seconds=3.0,
+             audio=None, audio_vae=None, vae=None, extension_seconds=12.0, guide_overlap_seconds=3.0,
              frame_rate=24.0, guide_strength=1.0, epsilon=1e-3, resume_from_seconds=-1.0,
              anchor_image=None, anchor_latent=None, anchor_mode="off", anchor_strength=0.25,
              anchor_every_n_steps=1, combine_global=False):
@@ -2268,7 +2295,7 @@ class LTXExtendInit:
         state = {
             "model": model, "clip": clip, "audio_vae": audio_vae, "master_audio": audio,
             "prompts": prompts, "global_prompt": global_prompt or "", "base_seed": int(base_seed),
-            "combine_global": bool(combine_global),
+            "combine_global": bool(combine_global), "vae": vae,
             "latent": seed_latent, "abs_pos_px": abs_pos_px,
             "extension_seconds": float(extension_seconds), "guide_overlap_seconds": float(guide_overlap_seconds),
             "frame_rate": fps, "guide_strength": float(guide_strength), "epsilon": float(epsilon),
@@ -2325,6 +2352,7 @@ class LTXExtendStep:
             st.get("model"), st.get("clip"), st.get("latent"), prompt,
             st.get("extension_seconds", 12.0), st.get("guide_overlap_seconds", 3.0),
             st.get("frame_rate", 24.0), audio=st.get("master_audio"), audio_vae=st.get("audio_vae"),
+            vae=st.get("vae"),
             guide_strength=st.get("guide_strength", 1.0), epsilon=st.get("epsilon", 1e-3),
             audio_base_px=int(st.get("abs_pos_px", 0)), log_tag="LTXExtendStep",
             anchor_image=st.get("anchor_image"), anchor_latent=st.get("anchor_latent"),
