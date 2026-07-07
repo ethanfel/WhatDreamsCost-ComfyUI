@@ -225,6 +225,33 @@ app.registerExtension({
           return rr;
         };
       }
+
+      // PERSISTENCE. onNodeCreated runs BEFORE ComfyUI restores saved widget values, so the
+      // prompts read at build time are empty on reload. Two safeguards:
+      //  1) prompts_json is a normal serialized widget -> its value goes into the workflow AND to
+      //     the backend. onConfigure (fires AFTER widgets_values are applied) re-pulls it into the UI.
+      //  2) Belt-and-suspenders: also stash prompts in the node's own serialized data, in case a
+      //     frontend drops hidden widgets from widgets_values — and re-hydrate the widget on load so
+      //     the backend still receives them.
+      const onSerialize = this.onSerialize;
+      this.onSerialize = function (o) {
+        if (onSerialize) onSerialize.apply(this, arguments);
+        try { o.ltxst_prompts = ui.prompts; } catch (e) {}
+      };
+      const onConfigure = this.onConfigure;
+      this.onConfigure = function (info) {
+        const rr = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+        let p = readPrompts(this);
+        if ((!p || !Object.keys(p).length) && info && info.ltxst_prompts && Object.keys(info.ltxst_prompts).length) {
+          p = info.ltxst_prompts;
+          writePrompts(this, p);  // re-hydrate prompts_json so the backend gets them on run
+        }
+        ui.prompts = p || {};
+        if (!ui.hasBackendSegments) ui.segments = fallbackSegments(ui.node);
+        selectSegment(ui, ui.sel || 0);
+        layoutSegments(ui);
+        return rr;
+      };
       return r;
     };
   },
