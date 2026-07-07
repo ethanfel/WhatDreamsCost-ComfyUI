@@ -1752,6 +1752,10 @@ class LTXDirector(io.ComfyNode):
         guide_data["start_frame"] = start_frame
         guide_data["duration_frames"] = duration_frames
         guide_data["resize_method"] = resize_method
+        # Surface the assembled per-segment prompts (" | "-joined, timeline order) + global, so the
+        # LTX Timeline -> Extend Prompts adapter can pull the ordered prompt list without re-parsing.
+        guide_data["local_prompts"] = local_prompts
+        guide_data["global_prompt"] = global_prompt
 
         return io.NodeOutput(patched, conditioning, latent, audio_latent, guide_data, motion_guide_data, float(frame_rate), audio_out)
 

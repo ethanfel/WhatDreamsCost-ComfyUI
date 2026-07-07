@@ -179,5 +179,45 @@ class LTXExtendPromptStudio:
         return (state, "\n".join(prompts))
 
 
-STUDIO_NODE_CLASS_MAPPINGS = {"LTXExtendPromptStudio": LTXExtendPromptStudio}
-STUDIO_NODE_DISPLAY_NAME_MAPPINGS = {"LTXExtendPromptStudio": "LTX Extend Prompt Studio"}
+class LTXTimelineToExtendPrompts:
+    """Adapter: pull the ordered per-step prompts + master audio out of an LTX Director to drive the
+    extend loop. Author your beats on a normal Director timeline (auto-split to the extend windows),
+    wire its guide_data + combined_audio here, then feed 'prompts' into LTX Extend Init / Prompt Studio
+    and 'master_audio' as the extend master audio. Reuses the Director's proven timeline UI as-is."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guide_data": ("GUIDE_DATA", {"tooltip": "guide_data from LTX Director — carries the timeline's per-segment prompts in order."}),
+            },
+            "optional": {
+                "combined_audio": ("AUDIO", {"tooltip": "The Director's combined_audio output = the master audio. Passed straight through."}),
+            },
+        }
+
+    RETURN_TYPES = (_STUDIO_ANY, "AUDIO", "STRING", "INT")
+    RETURN_NAMES = ("prompts", "master_audio", "prompts_text", "count")
+    FUNCTION = "adapt"
+    CATEGORY = "WhatDreamsCost"
+
+    def adapt(self, guide_data, combined_audio=None):
+        gd = guide_data or {}
+        raw = gd.get("local_prompts", "") or ""
+        # Director joins per-segment prompts with " | " in timeline order; blanks stay (the extend
+        # Init/Step falls back to global_prompt for an empty step).
+        prompts = [p.strip() for p in raw.split("|")] if raw.strip() else []
+        text = "\n".join(prompts)
+        log.info("[LTXTimelineToExtendPrompts] %d prompts from timeline; master_audio=%s",
+                 len(prompts), "yes" if combined_audio is not None else "none")
+        return (prompts, combined_audio, text, len(prompts))
+
+
+STUDIO_NODE_CLASS_MAPPINGS = {
+    "LTXExtendPromptStudio": LTXExtendPromptStudio,
+    "LTXTimelineToExtendPrompts": LTXTimelineToExtendPrompts,
+}
+STUDIO_NODE_DISPLAY_NAME_MAPPINGS = {
+    "LTXExtendPromptStudio": "LTX Extend Prompt Studio",
+    "LTXTimelineToExtendPrompts": "LTX Timeline → Extend Prompts",
+}

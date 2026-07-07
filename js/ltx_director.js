@@ -3555,6 +3555,16 @@ class TimelineEditor {
       this.alignWindowToLatentGrid();
     });
 
+    const extendSplitBtn = document.createElement("button");
+    extendSplitBtn.className = "pr-btn";
+    extendSplitBtn.innerHTML = `⎇ Extend Split`;
+    extendSplitBtn.title = "Auto-split into extension-step text segments (one prompt per step), tiled to the extend windows so the timeline represents the sequence. Feeds LTX Timeline → Extend Prompts.";
+    extendSplitBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.autoSplitForExtend();
+    });
+    this.extendSplitBtn = extendSplitBtn;
+
     const retakeToggleBtn = document.createElement("button");
     retakeToggleBtn.className = "pr-btn";
     retakeToggleBtn.style.padding = "4px 8px";
@@ -3638,6 +3648,7 @@ class TimelineEditor {
     btnGroup.appendChild(markBtn);
     btnGroup.appendChild(extractAudioBtn);
     btnGroup.appendChild(alignGridBtn);
+    btnGroup.appendChild(extendSplitBtn);
     btnGroup.appendChild(helpBtn);
     btnGroup.appendChild(settingsBtn);
     rightGroup.appendChild(btnGroup);
@@ -11810,6 +11821,59 @@ class TimelineEditor {
     this.selectedIndex = this.timeline.segments.findIndex(s => s.id === seg.id);
     this.updateUIFromSelection();
     this.commitChanges();
+  }
+
+  // Auto-split the prompt track into one text segment per EXTENSION STEP, tiled to the same windows
+  // the extend loop generates, so the timeline represents the sequence (where each prompt applies and
+  // where the guiding/overlap seconds are). Feeds LTX Timeline → Extend Prompts.
+  autoSplitForExtend() {
+    const fps = this.getFrameRate();
+    const cur = this._extendSplitParams || "10, 12, 3, 14";
+    const inp = window.prompt(
+      "Auto-split for Extend — enter:  seedSeconds, extensionSeconds, overlapSeconds, totalSteps", cur);
+    if (!inp) return;
+    const p = inp.split(",").map(s => parseFloat(s.trim()));
+    const [seedS, extS, ovS, totalF] = p;
+    if (![seedS, extS, ovS, totalF].every(v => isFinite(v)) || totalF < 1) {
+      window.alert("Enter 4 numbers: seedSeconds, extensionSeconds, overlapSeconds, totalSteps");
+      return;
+    }
+    this._extendSplitParams = inp;
+    const tsf = 8;
+    const overlapPx = Math.max(1, Math.round(ovS * fps));
+    const extPx = Math.max(1, Math.round(extS * fps));
+    const windowPx = overlapPx + extPx;
+    const ltxv = Math.ceil((windowPx - 1) / 8) * 8 + 1;
+    const px2lat = (px) => Math.floor((Math.ceil((px - 1) / 8) * 8 + 1 - 1) / 8) + 1;
+    const tWin = Math.floor((ltxv - 1) / 8) + 1;
+    const seedLat = px2lat(Math.round(seedS * fps));
+    const nOvSeed = Math.max(1, Math.min(seedLat, Math.ceil(overlapPx / 8)));
+    const nOvWin = Math.max(1, Math.min(tWin, Math.ceil(overlapPx / 8)));
+    const seedOff = Math.max(0, (seedLat - nOvSeed) * tsf);
+    const steady = Math.max(1, (tWin - nOvWin) * tsf);
+    const overlapDec = (nOvWin - 1) * tsf + 1;   // leading continuation ("guiding seconds")
+    const N = Math.floor(totalF);
+    // preserve any existing text prompts by order; keep non-text (image/etc) segments untouched
+    const prev = this.timeline.segments.filter(s => s.type === "text")
+      .sort((a, b) => a.start - b.start).map(s => s.prompt || "");
+    this.timeline.segments = this.timeline.segments.filter(s => s.type !== "text");
+    for (let i = 0; i < N; i++) {
+      this.timeline.segments.push({
+        id: Date.now().toString() + i + Math.random().toString(36).substr(2, 4),
+        start: seedOff + i * steady,
+        length: steady,
+        prompt: prev[i] || "",
+        type: "text",
+        guideFrames: overlapDec,
+      });
+    }
+    this.timeline.segments.sort((a, b) => a.start - b.start);
+    this.growTimelineIfNeeded(seedOff + N * steady);
+    this.selectionType = "image";
+    this.selectedIndex = this.timeline.segments.findIndex(s => s.type === "text");
+    if (this.updateUIFromSelection) this.updateUIFromSelection();
+    this.commitChanges();
+    this.render();
   }
 
   updateSeekBarBackground() {
