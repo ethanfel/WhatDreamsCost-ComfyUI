@@ -300,9 +300,6 @@ class LTXDirectorGuide:
                 "tile_size": ("INT", {"default": 256, "min": 64, "max": 512, "step": 32}),
                 "tile_overlap": ("INT", {"default": 64, "min": 16, "max": 256, "step": 16}),
                 "retake_mode": ("BOOLEAN", {"default": False, "tooltip": "Force Retake Mode. If false, it will still auto-detect Retake Mode from the timeline data."}),
-                "latent_clip": ("LATENT", {"tooltip": "Optional (experimental). A pre-computed clip latent (from the SAME video VAE) pasted directly into the generation latent for max quality — skips the decode->re-encode round-trip. Pair with a preview video segment at the same position (set its guide strength to 0 so it isn't re-encoded)."}),
-                "latent_clip_start": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "tooltip": "Pixel start frame (timeline coords) where the latent clip is placed. Snapped to the latent temporal grid."}),
-                "latent_clip_freeze": ("BOOLEAN", {"default": True, "tooltip": "Freeze the pasted region (noise_mask=0) so it is preserved exactly (recommended). Off = use it only as a soft init that still gets denoised."}),
             }
         }
 
@@ -311,7 +308,7 @@ class LTXDirectorGuide:
     FUNCTION = "execute"
 
     @classmethod
-    def execute(cls, positive, negative, vae, latent, guide_data, motion_guide_data=None, model=None, ic_lora_name="None", ic_lora_name_in=None, ic_lora_strength=1.0, scale_by=1.0, upscale_method="bicubic", image_attention_strength=1.0, crop="center", auto_snap_ic_grid=True, use_tiled_encode=False, tile_size=256, tile_overlap=64, retake_mode=False, latent_clip=None, latent_clip_start=0, latent_clip_freeze=True):
+    def execute(cls, positive, negative, vae, latent, guide_data, motion_guide_data=None, model=None, ic_lora_name="None", ic_lora_name_in=None, ic_lora_strength=1.0, scale_by=1.0, upscale_method="bicubic", image_attention_strength=1.0, crop="center", auto_snap_ic_grid=True, use_tiled_encode=False, tile_size=256, tile_overlap=64, retake_mode=False):
         # A connected "LTX IC-LoRA Selector" overrides the ic_lora_name widget ("None" = disabled).
         if ic_lora_name_in is not None and str(ic_lora_name_in).strip():
             ic_lora_name = str(ic_lora_name_in).strip()
@@ -600,34 +597,35 @@ class LTXDirectorGuide:
         else:
             print("[LTXDirectorGuide] No timeline guides present. Passing through.")
 
-        # --- Experimental: paste a pre-computed clip latent (max quality, no VAE re-encode) ---
-        # Placed last so it is authoritative over any keyframe/motion guide in that region, and
-        # clamped to the real generation frames (initial_latent_length), never the appended keyframes.
-        if latent_clip is not None:
+        # --- Paste any '<clip>.latent' sibling clips the Director loaded (max quality, no VAE
+        # re-encode). Placed last so they're authoritative over keyframe/motion guides in that
+        # region, and frozen (noise_mask=0) to preserve them exactly. insert_frame is already
+        # relative to the generation window; clamp to the real generation frames. ---
+        for clip in (guide_data.get("latent_clips", []) if guide_data else []):
             try:
-                clip_samples = latent_clip["samples"] if isinstance(latent_clip, dict) else latent_clip
-                clip_samples = clip_samples.to(device=latent_image.device, dtype=latent_image.dtype)
-                rel = max(0, int(latent_clip_start) - int(guide_data.get("start_frame", 0)))
-                lat_start = rel // time_scale_factor
+                samples = clip.get("samples")
+                if samples is None:
+                    continue
+                samples = samples.to(device=latent_image.device, dtype=latent_image.dtype)
+                lat_start = int(clip.get("insert_frame", 0)) // time_scale_factor
                 lat_start = max(0, min(lat_start, initial_latent_length))
-                n = min(int(clip_samples.shape[2]), initial_latent_length - lat_start)
+                n = min(int(samples.shape[2]), initial_latent_length - lat_start)
                 shapes_ok = (
-                    clip_samples.shape[0] == latent_image.shape[0]
-                    and clip_samples.shape[1] == latent_image.shape[1]
-                    and clip_samples.shape[3] == latent_image.shape[3]
-                    and clip_samples.shape[4] == latent_image.shape[4]
+                    samples.shape[0] == latent_image.shape[0]
+                    and samples.shape[1] == latent_image.shape[1]
+                    and samples.shape[3] == latent_image.shape[3]
+                    and samples.shape[4] == latent_image.shape[4]
                 )
                 if n > 0 and shapes_ok:
-                    latent_image[:, :, lat_start:lat_start + n] = clip_samples[:, :, :n]
-                    if latent_clip_freeze:
-                        noise_mask[:, :, lat_start:lat_start + n] = 0.0
-                    print(f"[LTXDirectorGuide] Pasted latent_clip at latent frames {lat_start}:{lat_start + n} (freeze={latent_clip_freeze})")
+                    latent_image[:, :, lat_start:lat_start + n] = samples[:, :, :n]
+                    noise_mask[:, :, lat_start:lat_start + n] = 0.0
+                    print(f"[LTXDirectorGuide] Using sibling latent at latent frames {lat_start}:{lat_start + n}")
                 elif not shapes_ok:
-                    print(f"[LTXDirectorGuide] latent_clip {tuple(clip_samples.shape)} incompatible with target {tuple(latent_image.shape)} (channels/spatial/batch must match); skipped.")
+                    print(f"[LTXDirectorGuide] sibling latent {tuple(samples.shape)} incompatible with target {tuple(latent_image.shape)} (channels/spatial/batch must match); skipped.")
                 else:
-                    print("[LTXDirectorGuide] latent_clip falls outside the generated range; skipped.")
+                    print("[LTXDirectorGuide] sibling latent falls outside the generated range; skipped.")
             except Exception as e:
-                print(f"[LTXDirectorGuide] latent_clip paste failed: {e}")
+                print(f"[LTXDirectorGuide] sibling latent paste failed: {e}")
 
         exact_crop_frames = max(0, int(latent_image.shape[2]) - initial_latent_length)
         positive = node_helpers.conditioning_set_values(positive, {"nghtdrp_guide_crop_latent_frames": exact_crop_frames})

@@ -544,6 +544,38 @@ def _load_video_tensor(seg: dict, frame_rate: float) -> torch.Tensor:
     frames_np = np.array(frames, dtype=np.float32) / 255.0
     return torch.from_numpy(frames_np)
 
+def _load_sibling_latent(seg):
+    """If a '<clip>.latent' file sits next to the guide segment's media file, load and
+    return its raw latent tensor [B, C, F, H, W]; otherwise None. This lets a clip be
+    inserted directly (max quality) instead of being decoded->re-encoded through the VAE."""
+    media = seg.get("imageFile")
+    if not media:
+        return None
+    root, _ext = os.path.splitext(media)
+    latent_rel = root + ".latent"
+    input_dir = folder_paths.get_input_directory()
+    candidates = [
+        os.path.join(input_dir, latent_rel),
+        os.path.join(input_dir, "whatdreamscost", os.path.basename(latent_rel)),
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if not path:
+        return None
+    try:
+        import safetensors.torch
+        data = safetensors.torch.load_file(path, device="cpu")
+        t = data.get("latent_tensor")
+        if t is None:
+            return None
+        t = t.to(torch.float32)
+        if "latent_format_version_0" not in data:
+            t = t * (1.0 / 0.18215)  # legacy .latent files stored a scaled tensor
+        return t
+    except Exception as e:
+        log.warning("[LTXDirector] Failed to load sibling latent %s: %s", path, e)
+        return None
+
+
 def _resolve_resize_algo(name):
     """Map a resize-algo dropdown option to (torch interpolate mode, antialias).
 
@@ -1210,7 +1242,7 @@ class LTXDirector(io.ComfyNode):
         # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
         # "segment_numbers" carries the 0-based timeline position of each guide (see below).
         # "original_images" holds each guide's pre-resize image (parallel to "images").
-        guide_data = {"images": [], "original_images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "frame_rate": frame_rate}
+        guide_data = {"images": [], "original_images": [], "insert_frames": [], "strengths": [], "segment_numbers": [], "latent_clips": [], "frame_rate": frame_rate}
         derived_w, derived_h = custom_width, custom_height
         try:
             img_segs = [
@@ -1297,6 +1329,15 @@ class LTXDirector(io.ComfyNode):
                 else:
                     insert_frame = max(0, seg_start - start_frame)
                 strength = strengths[idx] if idx < len(strengths) else 1.0
+
+                # If a '<clip>.latent' sibling exists, use it directly (max quality) and skip
+                # encoding this segment as a keyframe. The video is only used for preview/dims.
+                sibling_latent = _load_sibling_latent(seg)
+                if sibling_latent is not None:
+                    guide_data["latent_clips"].append({"samples": sibling_latent, "insert_frame": insert_frame})
+                    log.info("[LTXDirector] Using sibling latent for %s", seg.get("imageFile"))
+                    continue
+
                 guide_data["images"].append(tensor)
                 guide_data["original_images"].append(original_tensor)
                 guide_data["insert_frames"].append(insert_frame)
