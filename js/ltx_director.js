@@ -3539,6 +3539,22 @@ class TimelineEditor {
       this.extractMarkedAudio();
     });
 
+    const alignGridBtn = document.createElement("button");
+    alignGridBtn.className = "pr-btn";
+    alignGridBtn.style.padding = "6px";
+    alignGridBtn.style.display = "flex";
+    alignGridBtn.style.alignItems = "center";
+    alignGridBtn.style.justifyContent = "center";
+    alignGridBtn.style.width = "28px";
+    alignGridBtn.style.height = "28px";
+    alignGridBtn.style.boxSizing = "border-box";
+    alignGridBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg>`;
+    alignGridBtn.title = "Align the generation window to the latent grid (start_frame → ×8, duration → 8n+1)";
+    alignGridBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.alignWindowToLatentGrid();
+    });
+
     const retakeToggleBtn = document.createElement("button");
     retakeToggleBtn.className = "pr-btn";
     retakeToggleBtn.style.padding = "4px 8px";
@@ -3621,6 +3637,7 @@ class TimelineEditor {
     btnGroup.appendChild(endBtn);
     btnGroup.appendChild(markBtn);
     btnGroup.appendChild(extractAudioBtn);
+    btnGroup.appendChild(alignGridBtn);
     btnGroup.appendChild(helpBtn);
     btnGroup.appendChild(settingsBtn);
     rightGroup.appendChild(btnGroup);
@@ -5732,6 +5749,21 @@ class TimelineEditor {
     } catch (e) {
       window.alert("Extract request failed: " + e.message);
     }
+  }
+
+  // Snap the generation window to the LTX latent grid: start_frame -> nearest multiple of 8,
+  // duration_frames -> nearest 8n+1 (the length the auto-latent actually uses). Uses the same
+  // safe set-value + callback pattern as Mark Selection (doesn't touch the live sync guards).
+  alignWindowToLatentGrid() {
+    const start = Math.max(0, Math.round(this.getStartFrames() / 8) * 8);
+    const dur = Math.max(1, Math.ceil((this.getDurationFrames() - 1) / 8) * 8 + 1); // 8n+1
+    const end = start + dur;
+    if (this.startFramesWidget) this.startFramesWidget.value = start;
+    if (this.endFramesWidget) this.endFramesWidget.value = end;
+    if (this.startFramesWidget && this.startFramesWidget.callback) this.startFramesWidget.callback(start);
+    if (this.endFramesWidget && this.endFramesWidget.callback) this.endFramesWidget.callback(end);
+    this.commitChanges();
+    this.render();
   }
 
   markCurrentSelection() {
