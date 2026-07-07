@@ -4,7 +4,7 @@ from .ltx_sequencer import LTXSequencer
 from .speech_length_calculator import SpeechLengthCalculator
 from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
-from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend
+from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect
 from .ltx_director_guide import LTXDirectorGuide, LTXDirectorCropGuides, LTXICLoraSelector
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
@@ -32,6 +32,9 @@ NODE_CLASS_MAPPINGS = {
     "LTXDirector": LTXDirector,
     "LTXKeyframeOut": LTXKeyframeOut,
     "LTXAutoExtend": LTXAutoExtend,
+    "LTXExtendInit": LTXExtendInit,
+    "LTXExtendStep": LTXExtendStep,
+    "LTXExtendCollect": LTXExtendCollect,
     "LTXDirectorGuide": LTXDirectorGuide,
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
     "LTXICLoraSelector": LTXICLoraSelector,
@@ -47,6 +50,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LTXDirector": "LTX Director",
     "LTXKeyframeOut": "LTX Keyframe Out",
     "LTXAutoExtend": "LTX Auto Extend",
+    "LTXExtendInit": "LTX Extend Init",
+    "LTXExtendStep": "LTX Extend Step",
+    "LTXExtendCollect": "LTX Extend Collect",
     "LTXDirectorGuide": "LTX Director Guide",
     "LTXDirectorCropGuides": "LTX Director Crop Guides",
     "LTXICLoraSelector": "LTX IC-LoRA Selector",
