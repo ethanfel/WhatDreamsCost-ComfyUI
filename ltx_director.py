@@ -544,10 +544,11 @@ def _load_video_tensor(seg: dict, frame_rate: float) -> torch.Tensor:
     frames_np = np.array(frames, dtype=np.float32) / 255.0
     return torch.from_numpy(frames_np)
 
-def _load_sibling_latent(seg):
-    """If a '<clip>.latent' file sits next to the guide segment's media file, load and
-    return its raw latent tensor [B, C, F, H, W]; otherwise None. This lets a clip be
-    inserted directly (max quality) instead of being decoded->re-encoded through the VAE."""
+def _load_sibling_latent(seg, extra_dirs=None):
+    """If a '<clip>.latent' file exists (next to the clip, in input/output, or in a
+    user-provided folder/path in `extra_dirs`), load and return its raw latent tensor
+    [B, C, F, H, W]; otherwise None. Lets a clip be inserted directly (max quality)
+    instead of being decoded->re-encoded through the VAE."""
     import re
     media = seg.get("imageFile") or ""      # uploaded name, e.g. "1720000000000_clip.mp4"
     orig = seg.get("fileName") or ""        # original name the user dropped in, e.g. "clip.mp4"
@@ -575,21 +576,38 @@ def _load_sibling_latent(seg):
         output_dir = folder_paths.get_output_directory()
     except Exception:
         output_dir = None
-    search_dirs = [input_dir, os.path.join(input_dir, "whatdreamscost")]
+
+    # User-provided path(s) take priority: an explicit '.latent' file (used as-is), or a
+    # folder to search. Relative paths resolve under output/ then input/.
+    search_dirs = []
+    candidates = []
+    for d in (extra_dirs or []):
+        d = (d or "").strip()
+        if not d:
+            continue
+        if os.path.isfile(d) and d.lower().endswith(".latent"):
+            candidates.append(d)  # exact file
+        elif os.path.isabs(d):
+            search_dirs.append(d)  # absolute folder
+        else:
+            for base in ([output_dir, input_dir] if output_dir else [input_dir]):
+                search_dirs.append(os.path.join(base, d))  # relative -> output/ then input/
+
+    search_dirs += [input_dir, os.path.join(input_dir, "whatdreamscost")]
     if output_dir:
         search_dirs += [output_dir, os.path.join(output_dir, "whatdreamscost")]
 
-    candidates = []
-    if media:  # also honor the imageFile's own relative subfolder
+    if media:  # also honor the imageFile's own relative subfolder in input/
         candidates.append(os.path.join(input_dir, os.path.splitext(media)[0] + ".latent"))
-    for d in search_dirs:
+    for dd in search_dirs:
         for nm in latent_names:
-            candidates.append(os.path.join(d, nm))
+            candidates.append(os.path.join(dd, nm))
 
     candidates = list(dict.fromkeys(candidates))  # dedupe, keep order
     path = next((p for p in candidates if os.path.exists(p)), None)
     if not path:
-        log.info("[LTXDirector] No sibling latent for %s. Checked these paths:\n  %s",
+        log.info("[LTXDirector] No sibling latent for %s. Checked these paths:\n  %s\n"
+                 "  (tip: set the node's latent_dir input to the folder, e.g. output/LTX_video)",
                  (orig or media), "\n  ".join(candidates))
         return None
     try:
@@ -1203,6 +1221,15 @@ class LTXDirector(io.ComfyNode):
                     ),
                 ),
                 io.String.Input(
+                    "latent_dir", default="", optional=True,
+                    tooltip=(
+                        "Optional. Folder (or an exact .latent file) where per-clip '<name>.latent' files "
+                        "live — used to insert a clip's saved latent directly (max quality, no VAE re-encode). "
+                        "Relative paths resolve under output/ then input/ (e.g. 'LTX_video'). Name each .latent "
+                        "after the clip's ORIGINAL filename. Leave empty to just look next to the clip / in output/."
+                    ),
+                ),
+                io.String.Input(
                     "beats_json", multiline=True, default="", optional=True, force_input=True,
                     tooltip=(
                         "Optional. A 'beats'/shot-list JSON (fps, global_prompt, beats:[{prompt, "
@@ -1231,7 +1258,7 @@ class LTXDirector(io.ComfyNode):
                 custom_width=768, custom_height=512, resize_method="maintain aspect ratio",
                 resize_algo="bilinear", divisible_by=32, img_compression=0, audio_vae=None, optional_latent=None,
                 use_custom_audio=False, inpaint_audio=True, use_custom_motion=True, override_audio=False,
-                beats_json="") -> io.NodeOutput:
+                beats_json="", latent_dir="") -> io.NodeOutput:
 
         # Parse timeline data
         try:
@@ -1365,7 +1392,7 @@ class LTXDirector(io.ComfyNode):
 
                 # If a '<clip>.latent' sibling exists, use it directly (max quality) and skip
                 # encoding this segment as a keyframe. The video is only used for preview/dims.
-                sibling_latent = _load_sibling_latent(seg)
+                sibling_latent = _load_sibling_latent(seg, [latent_dir])
                 if sibling_latent is not None:
                     guide_data["latent_clips"].append({"samples": sibling_latent, "insert_frame": insert_frame})
                     log.info("[LTXDirector] Using sibling latent for %s", seg.get("imageFile"))
