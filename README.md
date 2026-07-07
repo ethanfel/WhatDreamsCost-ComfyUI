@@ -188,6 +188,17 @@ Download workflows here: https://github.com/WhatDreamsCost/WhatDreamsCost-ComfyU
 
 **Tutorial videos and documentation coming soon**
 
+### LTX Auto Extend Source Anchor
+
+For long LTX 2.3 extension runs, keep the normal tail-latent continuation guide enabled and optionally add a weak source anchor:
+
+- Connect `LTX Keyframe Out.original` to `anchor_image` when you want the pristine source frame to stabilize identity.
+- Use `anchor_mode: auto` for new long runs. Existing workflows default to `off`.
+- Keep `anchor_strength` low. Recommended range: `0.15` to `0.35`; the default is `0.25`.
+- In loop workflows, `anchor_every_n_steps` controls how often the source anchor is emitted. Use `1` for maximum identity stability, or `2+` when the anchor pulls too hard.
+
+The previous-pass tail latent remains the primary continuity guide. The source anchor is only a weak identity and texture reference.
+
 
 ## Multi Image Loader
 <img width="1280" height="720" alt="Multi_Image_Loader_Wide_Gif" src="https://github.com/user-attachments/assets/99b6afd8-5197-4e6c-81da-a7bd156c42c7" />
