@@ -497,14 +497,20 @@ class LTXDirectorGuide:
                 # routed through the SAME append_keyframe path as an encoded clip so it conditions
                 # the extension. Only if its channels/spatial match this pass; else re-encode.
                 pre_latent = guide_latents[idx] if idx < len(guide_latents) else None
-                if pre_latent is not None and not (
-                    pre_latent.shape[1] == latent_image.shape[1]
-                    and pre_latent.shape[-2] == latent_height
-                    and pre_latent.shape[-1] == latent_width
-                ):
-                    print(f"[LTXDirectorGuide] sibling latent {tuple(pre_latent.shape)} != target "
-                          f"(C={latent_image.shape[1]}, {latent_height}x{latent_width}); re-encoding the clip instead.")
-                    pre_latent = None
+                if pre_latent is not None:
+                    if pre_latent.shape[1] != latent_image.shape[1]:
+                        # Channel mismatch = genuinely incompatible VAE; fall back to re-encoding.
+                        print(f"[LTXDirectorGuide] sibling latent {tuple(pre_latent.shape)} channels != "
+                              f"target C={latent_image.shape[1]}; re-encoding the clip instead.")
+                        pre_latent = None
+                    elif pre_latent.shape[-2] != latent_height or pre_latent.shape[-1] != latent_width:
+                        # Spatial mismatch — e.g. this Guide runs with scale_by (a low-res first pass)
+                        # or a two-pass low<->high res change. Resize the guide latent to the WORKING
+                        # resolution (the same spatial op scale_by applies to latent_image) instead of
+                        # discarding it, so the continuation guide still conditions the generation.
+                        print(f"[LTXDirectorGuide] sibling latent {tuple(pre_latent.shape[-2:])} -> resizing to "
+                              f"target {latent_height}x{latent_width} to match working res (scale_by).")
+                        pre_latent, _ = _resize_latent_spatial(pre_latent, None, latent_width, latent_height, upscale_method)
 
                 if pre_latent is not None:
                     guide_latent = pre_latent.to(device=latent_image.device, dtype=latent_image.dtype)
