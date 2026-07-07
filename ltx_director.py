@@ -1987,22 +1987,26 @@ def _build_extend_pass(model, clip, latent, prompt, extension_seconds, guide_ove
 
     dummy_img = torch.zeros((1, Hl * 32, Wl * 32, 3), dtype=torch.float32)
     # Guide source: raw tail latent by default (sharpest when the working res matches). If a video VAE
-    # is provided (HYBRID), decode the tail to images and feed the image-guide path instead — the Guide
-    # resizes PIXELS then re-encodes at the working res, which stays sharp under scale_by, vs.
-    # bilinear-resizing the latent (decodes soft/blurry). One VAE round-trip on the ~overlap frames, no mp4.
+    # is provided (HYBRID), decode to images and feed the image-guide path instead — the Guide resizes
+    # PIXELS then re-encodes at the working res, staying sharp under scale_by (vs. bilinear-resizing the
+    # latent, which decodes soft). DECODE-THEN-CUT: decode the WHOLE incoming latent so the tail has full
+    # temporal context (no causal-blur front frame), THEN slice the sharp tail from the decoded images.
     guide_img = dummy_img
     guide_lat = tail_latent
     if vae is not None:
         try:
-            dec = vae.decode(tail_latent)
+            dec = vae.decode(in_samples[0:1])
             if hasattr(dec, "ndim") and dec.ndim == 5:  # [B,T,H,W,C] -> [B*T,H,W,C]
                 _b, _t, _h, _w, _c = dec.shape
                 dec = dec.reshape(_b * _t, _h, _w, _c)
             if hasattr(dec, "ndim") and dec.ndim == 4 and int(dec.shape[-1]) >= 3:
-                guide_img = dec[..., :3].to(torch.float32)
+                tail_px = (n_overlap_lat - 1) * tsf + 1            # overlap length in pixel frames (8n+1)
+                n_full = int(dec.shape[0])
+                tail = dec[-tail_px:] if n_full > tail_px else dec  # sharp tail from the full-context decode
+                guide_img = tail[..., :3].to(torch.float32)
                 guide_lat = None  # -> Guide uses the image path (sharp resize + re-encode)
-                log.info("[%s] hybrid guide: decoded tail -> %d image(s) (image-path resize, no latent blur)",
-                         log_tag, int(guide_img.shape[0]))
+                log.info("[%s] hybrid guide: decoded FULL incoming latent (%d px) -> sharp tail %d px (image path)",
+                         log_tag, n_full, int(guide_img.shape[0]))
             else:
                 log.warning("[%s] guide decode gave shape %s — keeping raw latent guide.",
                             log_tag, tuple(getattr(dec, "shape", ())))
