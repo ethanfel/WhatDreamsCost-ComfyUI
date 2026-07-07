@@ -22,6 +22,8 @@
   - Stub ComfyUI-only imports.
   - Test anchor helper behavior and `_build_extend_pass()` guide-data output.
   - Test `LTXExtendInit` stores anchor state and `LTXExtendStep` honors cadence.
+- Test: `tests/conftest.py`
+  - Prevent pytest from importing the ComfyUI extension package `__init__.py` as a top-level test package before test stubs are installed.
 - Test: `tests/test_ltx_extend_loop_state.py`
   - Test native loop state folding preserves anchor fields.
 - Modify: `README.md`
@@ -33,6 +35,7 @@
 
 **Files:**
 - Create: `tests/test_ltx_autoextend_anchor.py`
+- Create: `tests/conftest.py`
 
 - [ ] **Step 1: Create the pytest harness and failing helper tests**
 
@@ -270,6 +273,17 @@ def test_build_extend_pass_auto_falls_back_from_bad_latent_to_image(ltx_director
 
 - [ ] **Step 2: Run the new tests and verify they fail**
 
+If pytest imports the repo root `__init__.py` before the fixture stubs install, add `tests/conftest.py`:
+
+```python
+import sys
+import types
+
+sys.modules.setdefault("__init__", types.ModuleType("__init__"))
+```
+
+This keeps pytest collection focused on the test module instead of importing the ComfyUI extension package as a top-level package.
+
 Run:
 
 ```bash
@@ -283,7 +297,7 @@ Expected: FAIL with missing helper attributes such as `_normalize_anchor_mode` o
 Run:
 
 ```bash
-git add tests/test_ltx_autoextend_anchor.py
+git add tests/test_ltx_autoextend_anchor.py tests/conftest.py
 git commit -m "test: cover LTX source anchor guide construction"
 ```
 
@@ -781,6 +795,7 @@ git commit -m "docs: explain LTX source anchor usage"
 **Files:**
 - Verify: `ltx_director.py`
 - Verify: `ltx_extend_loop.py`
+- Verify: `tests/conftest.py`
 - Verify: `tests/test_ltx_autoextend_anchor.py`
 - Verify: `tests/test_ltx_extend_loop_state.py`
 - Verify: `README.md`
@@ -800,7 +815,7 @@ Expected: PASS.
 Run:
 
 ```bash
-python -m py_compile ltx_director.py ltx_extend_loop.py tests/test_ltx_autoextend_anchor.py tests/test_ltx_extend_loop_state.py
+python -m py_compile ltx_director.py ltx_extend_loop.py tests/conftest.py tests/test_ltx_autoextend_anchor.py tests/test_ltx_extend_loop_state.py
 ```
 
 Expected: No output and exit code 0.
