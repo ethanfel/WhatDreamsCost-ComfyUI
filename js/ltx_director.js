@@ -2569,6 +2569,18 @@ class TimelineEditor {
     return bestFrame;
   }
 
+  // For a video/audio segment, the timeline position (frame) nearest to `pos` that lands the
+  // segment's trim on the LTX latent temporal grid (multiple of 8). This makes a trimmed
+  // selection line up exactly with the latent frames used (no //8 flooring surprise).
+  // Returns null for non-trimmable (text/image) segments.
+  _latentGridSnap(pos, seg) {
+    if (!seg) return null;
+    const trimmable = seg.type === "video" || seg.type === "motion_video" || this.selectionType === "audio";
+    if (!trimmable) return null;
+    const off = (seg.start || 0) - (seg.trimStart || 0);
+    return Math.round((pos - off) / 8) * 8 + off;
+  }
+
   getTrackFromY(y) {
     if (y > RULER_HEIGHT + this.blockHeight + this.audioTrackHeight) return "motion";
     if (y > RULER_HEIGHT + this.blockHeight) return "audio";
@@ -8958,6 +8970,9 @@ class TimelineEditor {
             }
           }
 
+          const _lg = this._latentGridSnap(jointPos, origRight);
+          if (_lg !== null) snapCandidates.push(_lg);
+
           for (const candidate of snapCandidates) {
             const diff = Math.abs(jointPos - candidate);
             if (diff < minDiff) {
@@ -9018,6 +9033,9 @@ class TimelineEditor {
               snapCandidates.push(seg.start + seg.length);
             }
           }
+
+          const _lg = this._latentGridSnap(targetEnd, t[targetIdx]);
+          if (_lg !== null) snapCandidates.push(_lg);
 
           for (const candidate of snapCandidates) {
             const diff = Math.abs(targetEnd - candidate);
@@ -9087,6 +9105,9 @@ class TimelineEditor {
               snapCandidates.push(seg.start + seg.length);
             }
           }
+
+          const _lg = this._latentGridSnap(newStart, t[targetIdx]);
+          if (_lg !== null) snapCandidates.push(_lg);
 
           for (const candidate of snapCandidates) {
             const diff = Math.abs(newStart - candidate);
