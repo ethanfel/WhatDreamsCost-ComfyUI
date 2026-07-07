@@ -548,28 +548,60 @@ def _load_sibling_latent(seg):
     """If a '<clip>.latent' file sits next to the guide segment's media file, load and
     return its raw latent tensor [B, C, F, H, W]; otherwise None. This lets a clip be
     inserted directly (max quality) instead of being decoded->re-encoded through the VAE."""
-    media = seg.get("imageFile")
-    if not media:
+    import re
+    media = seg.get("imageFile") or ""      # uploaded name, e.g. "1720000000000_clip.mp4"
+    orig = seg.get("fileName") or ""        # original name the user dropped in, e.g. "clip.mp4"
+    if not media and not orig:
         return None
-    root, _ext = os.path.splitext(media)
-    latent_rel = root + ".latent"
+
+    def _latent_names(name):
+        out = set()
+        base = os.path.basename(name or "")
+        if not base:
+            return out
+        root, _ = os.path.splitext(base)
+        out.add(root + ".latent")
+        stripped = re.sub(r"^\d+_", "", root)  # drop the upload timestamp prefix
+        if stripped and stripped != root:
+            out.add(stripped + ".latent")
+        return out
+
+    latent_names = _latent_names(media) | _latent_names(orig)
+    if not latent_names:
+        return None
+
     input_dir = folder_paths.get_input_directory()
-    candidates = [
-        os.path.join(input_dir, latent_rel),
-        os.path.join(input_dir, "whatdreamscost", os.path.basename(latent_rel)),
-    ]
+    try:
+        output_dir = folder_paths.get_output_directory()
+    except Exception:
+        output_dir = None
+    search_dirs = [input_dir, os.path.join(input_dir, "whatdreamscost")]
+    if output_dir:
+        search_dirs += [output_dir, os.path.join(output_dir, "whatdreamscost")]
+
+    candidates = []
+    if media:  # also honor the imageFile's own relative subfolder
+        candidates.append(os.path.join(input_dir, os.path.splitext(media)[0] + ".latent"))
+    for d in search_dirs:
+        for nm in latent_names:
+            candidates.append(os.path.join(d, nm))
+
     path = next((p for p in candidates if os.path.exists(p)), None)
     if not path:
+        log.info("[LTXDirector] No sibling latent for %s (tried %s in input/ and output/; "
+                 "name the .latent after the ORIGINAL clip name)", (orig or media), sorted(latent_names))
         return None
     try:
         import safetensors.torch
         data = safetensors.torch.load_file(path, device="cpu")
         t = data.get("latent_tensor")
         if t is None:
+            log.warning("[LTXDirector] %s has no 'latent_tensor' (not a ComfyUI .latent file)", path)
             return None
         t = t.to(torch.float32)
         if "latent_format_version_0" not in data:
             t = t * (1.0 / 0.18215)  # legacy .latent files stored a scaled tensor
+        log.info("[LTXDirector] Loaded sibling latent %s shape=%s", path, tuple(t.shape))
         return t
     except Exception as e:
         log.warning("[LTXDirector] Failed to load sibling latent %s: %s", path, e)
