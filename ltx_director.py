@@ -2543,6 +2543,38 @@ def _review_serve_audio(audio, key, attempt):
         return None
 
 
+class LTXReviewSeed:
+    """Small seed source controlled by the LTX Review Gate frontend."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "step": 1,
+                    "tooltip": "Seed value. LTX Review Gate can increment this by +1 from its Reroll seed button.",
+                }),
+            },
+            "optional": {
+                "gate_id": ("STRING", {
+                    "default": "",
+                    "tooltip": "Optional Review Gate node id to bind to. Leave blank when there is only one LTX Review Seed in the graph.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("seed",)
+    FUNCTION = "seed"
+    CATEGORY = "WhatDreamsCost"
+
+    def seed(self, seed=0, gate_id=""):
+        return (int(seed) & 0xffffffffffffffff,)
+
+
 class LTXReviewGate:
     """Human-in-the-loop review for the extend retry loop. BLOCKS, plays this attempt's decoded frames
     in the node, and waits for Pass / Reroll / Reload.

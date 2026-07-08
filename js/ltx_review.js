@@ -47,17 +47,54 @@ function keepFullWidth(node, container) {
 }
 
 function stopMedia(ui) {
+  pauseMedia(ui);
+  if (ui.video) ui.video.onloadeddata = null;
+}
+
+function pauseMedia(ui) {
   clearInterval(ui.timer);
   ui.timer = null;
   if (ui.video) { try { ui.video.pause(); } catch (e) {} }
   if (ui.audio) { try { ui.audio.pause(); } catch (e) {} }
 }
 
-// Prefer a real <video> at the generation fps; play the audio window alongside it. Fall back to the
-// base64 frame slideshow (at the correct fps) only when no video was encoded.
+function playMedia(ui) {
+  if (ui.video && ui.video.style.display !== "none" && ui.video.src) {
+    ui.video.play().catch(() => {});
+  } else if (ui.img && ui.img.style.display !== "none" && ui.frames?.length > 1 && !ui.timer) {
+    ui.timer = setInterval(() => {
+      ui.idx = (ui.idx + 1) % ui.frames.length;
+      ui.img.src = ui.frames[ui.idx];
+    }, 1000 / Math.max(1, ui.fps || 24));
+  }
+  if (ui.audio && ui.audio.src) {
+    try {
+      if (ui.video && ui.video.style.display !== "none") {
+        ui.audio.currentTime = ui.video.currentTime || 0;
+      } else {
+        ui.audio.currentTime = (ui.idx || 0) / Math.max(1, ui.fps || 24);
+      }
+    } catch (e) {}
+    ui.audio.play().catch(() => {});
+  }
+}
+
+function setMediaSource(el, url) {
+  if (!el) return;
+  if (url) {
+    el.src = url;
+    return;
+  }
+  el.removeAttribute("src");
+  try { el.load(); } catch (e) {}
+}
+
+// Prefer a real <video> at the generation fps. Fall back to the base64 frame slideshow
+// only when no video was encoded. Playback itself is hover-driven by buildUI().
 function showMedia(ui, d) {
   stopMedia(ui);
   const fps = Math.max(1, parseFloat(d.fps) || 24);
+  ui.fps = fps;
 
   if (d.video_url) {
     ui.view.classList.remove("empty");
@@ -66,16 +103,7 @@ function showMedia(ui, d) {
     ui.video.loop = true;
     ui.video.muted = !!d.audio_url;          // separate audio track -> keep video muted, play the audio el
     ui.video.src = d.video_url;
-    if (ui.audio) { ui.audio.src = d.audio_url || ""; ui.audio.loop = true; }
-    const play = () => {
-      ui.video.play().catch(() => {});
-      if (d.audio_url && ui.audio) {
-        try { ui.audio.currentTime = ui.video.currentTime || 0; } catch (e) {}
-        ui.audio.play().catch(() => {});
-      }
-    };
-    ui.video.onloadeddata = play;
-    play();
+    if (ui.audio) { setMediaSource(ui.audio, d.audio_url); ui.audio.loop = true; }
     return;
   }
 
@@ -83,21 +111,21 @@ function showMedia(ui, d) {
   ui.video.style.display = "none";
   ui.img.style.display = "block";
   ui.frames = d.frames || [];
-  if (ui.audio) { ui.audio.src = d.audio_url || ""; ui.audio.loop = true; if (d.audio_url) ui.audio.play().catch(() => {}); }
+  if (ui.audio) { setMediaSource(ui.audio, d.audio_url); ui.audio.loop = true; }
   if (!ui.frames.length) { ui.img.src = ""; ui.view.classList.add("empty"); return; }
   ui.view.classList.remove("empty");
   ui.idx = 0;
   ui.img.src = ui.frames[0];
-  if (ui.frames.length > 1) {
-    ui.timer = setInterval(() => {
-      ui.idx = (ui.idx + 1) % ui.frames.length;
-      ui.img.src = ui.frames[ui.idx];
-    }, 1000 / fps);
-  }
 }
 
 function setButtons(ui, enabled) {
   for (const b of ui.buttons) b.disabled = !enabled;
+}
+
+function setPassthroughButtons(ui) {
+  ui.passButton.disabled = true;
+  ui.rerollButton.disabled = false;
+  ui.reloadButton.disabled = true;
 }
 
 async function decide(nodeId, action, ui) {
@@ -114,6 +142,65 @@ async function decide(nodeId, action, ui) {
     ui.status.textContent = "error: " + e;
     setButtons(ui, true);
   }
+}
+
+const UINT64_MASK = (1n << 64n) - 1n;
+
+function widgetByName(node, name) {
+  return node?.widgets?.find((w) => w.name === name) || null;
+}
+
+function nodeClassName(node) {
+  return node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "";
+}
+
+function isReviewSeedNode(node) {
+  return node?._ltxReviewSeedNode || nodeClassName(node) === "LTXReviewSeed";
+}
+
+function nextSeedValue(value) {
+  let current = 0n;
+  try {
+    current = BigInt(String(value ?? 0).trim().split(".")[0] || "0");
+  } catch (e) {
+    current = 0n;
+  }
+  const next = (current + 1n) & UINT64_MASK;
+  return next <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(next) : next.toString();
+}
+
+function findControlledSeedNode(gateNode) {
+  const nodes = app.graph?._nodes || [];
+  const seeds = nodes.filter(isReviewSeedNode);
+  const gateId = String(gateNode?.id ?? "");
+  const matching = seeds.filter((node) => String(widgetByName(node, "gate_id")?.value || "").trim() === gateId);
+  if (matching.length === 1) return { node: matching[0], reason: "" };
+  if (matching.length > 1) return { node: null, reason: "multiple seed nodes match this gate_id" };
+  if (seeds.length === 1) return { node: seeds[0], reason: "" };
+  if (seeds.length === 0) return { node: null, reason: "no LTX Review Seed node found" };
+  return { node: null, reason: "set gate_id on one LTX Review Seed" };
+}
+
+function incrementControlledSeed(gateNode, ui) {
+  const { node, reason } = findControlledSeedNode(gateNode);
+  if (!node) {
+    if (ui) ui.status.textContent = reason;
+    return false;
+  }
+  const seedWidget = widgetByName(node, "seed");
+  if (!seedWidget) {
+    if (ui) ui.status.textContent = "controlled seed node has no seed widget";
+    return false;
+  }
+  const next = nextSeedValue(seedWidget.value);
+  seedWidget.value = next;
+  if (seedWidget.callback) {
+    try { seedWidget.callback(next); } catch (e) {}
+  }
+  if (app.graph?.setDirtyCanvas) app.graph.setDirtyCanvas(true, true);
+  if (app.graph?.change) app.graph.change();
+  if (ui) ui.status.textContent = `seed -> ${next}`;
+  return true;
 }
 
 function buildUI(node) {
@@ -149,10 +236,22 @@ function buildUI(node) {
   btns.append(pass, reroll, reload);
   wrap.append(view, status, btns);
 
-  const ui = { wrap, view, img, video, audio, status, buttons: [pass, reroll, reload], frames: [], idx: 0, timer: null };
+  const ui = {
+    wrap, view, img, video, audio, status,
+    buttons: [pass, reroll, reload],
+    passButton: pass,
+    rerollButton: reroll,
+    reloadButton: reload,
+    frames: [], idx: 0, timer: null, fps: 24, passthrough: false,
+  };
+  view.addEventListener("mouseenter", () => playMedia(ui));
+  view.addEventListener("mouseleave", () => pauseMedia(ui));
   // read node.id FRESH at click — it isn't final at onNodeCreated and the backend keys by the display id
   pass.onclick = () => decide(String(node.id), "pass", ui);
-  reroll.onclick = () => decide(String(node.id), "reroll", ui);
+  reroll.onclick = () => {
+    incrementControlledSeed(node, ui);
+    if (!ui.passthrough) decide(String(node.id), "reroll", ui);
+  };
   reload.onclick = () => decide(String(node.id), "reload", ui);
   setButtons(ui, false);
   return ui;
@@ -168,6 +267,15 @@ function uiForNodeId(nodeId) {
 app.registerExtension({
   name: "WhatDreamsCost.LTXReviewGate",
   async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name === "LTXReviewSeed") {
+      const onCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function () {
+        const r = onCreated ? onCreated.apply(this, arguments) : undefined;
+        this._ltxReviewSeedNode = true;
+        return r;
+      };
+      return;
+    }
     if (nodeData.name !== "LTXReviewGate") return;
     const onCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
@@ -200,8 +308,9 @@ api.addEventListener("ltx_review_show", (e) => {
   if (!ui) return;
   const kind = d.video_url ? "video" : `${(d.frames || []).length} frames`;
   showMedia(ui, d);
+  ui.passthrough = !!d.passthrough;
   if (d.passthrough) {
-    setButtons(ui, false);   // preview only — the run doesn't wait for a decision
+    setPassthroughButtons(ui);   // preview only — only manual seed control remains active
     ui.status.textContent = `attempt ${d.attempt} — preview (${kind}, passthrough)`;
   } else {
     setButtons(ui, true);

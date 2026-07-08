@@ -4,7 +4,7 @@ from .ltx_sequencer import LTXSequencer
 from .speech_length_calculator import SpeechLengthCalculator
 from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
-from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect, LTXReviewGate
+from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect, LTXReviewGate, LTXReviewSeed
 from .ltx_extend_loop import LOOP_NODE_CLASS_MAPPINGS, LOOP_NODE_DISPLAY_NAME_MAPPINGS
 from .ltx_extend_studio import STUDIO_NODE_CLASS_MAPPINGS, STUDIO_NODE_DISPLAY_NAME_MAPPINGS
 from .ltx_director_guide import LTXDirectorGuide, LTXDirectorCropGuides, LTXICLoraSelector
@@ -38,6 +38,7 @@ NODE_CLASS_MAPPINGS = {
     "LTXExtendStep": LTXExtendStep,
     "LTXExtendCollect": LTXExtendCollect,
     "LTXReviewGate": LTXReviewGate,
+    "LTXReviewSeed": LTXReviewSeed,
     "LTXDirectorGuide": LTXDirectorGuide,
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
     "LTXICLoraSelector": LTXICLoraSelector,
@@ -59,6 +60,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LTXExtendStep": "LTX Extend Step",
     "LTXExtendCollect": "LTX Extend Collect",
     "LTXReviewGate": "LTX Review Gate",
+    "LTXReviewSeed": "LTX Review Seed",
     "LTXDirectorGuide": "LTX Director Guide",
     "LTXDirectorCropGuides": "LTX Director Crop Guides",
     "LTXICLoraSelector": "LTX IC-LoRA Selector",
