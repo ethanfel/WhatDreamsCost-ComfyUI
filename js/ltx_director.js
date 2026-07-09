@@ -4811,6 +4811,27 @@ class TimelineEditor {
     this._renderLoop = requestAnimationFrame(() => this.checkResize());
   }
 
+  syncComfyLayoutAfterDrag({ resizeNodeHeight = false, forceRender = false, nextFrame = false } = {}) {
+    if (resizeNodeHeight && this.node && this.node.computeSize) {
+      const sz = this.node.computeSize();
+      if (Array.isArray(sz) && Number.isFinite(sz[1])) {
+        this.node.size[1] = sz[1];
+      }
+    }
+
+    this.syncLayoutToNode(forceRender);
+
+    if (nextFrame) {
+      requestAnimationFrame(() => this.syncLayoutToNode(forceRender));
+    }
+
+    if (this.node?.setDirtyCanvas) {
+      this.node.setDirtyCanvas(true, true);
+    } else if (window.app && window.app.graph) {
+      window.app.graph.setDirtyCanvas(true, true);
+    }
+  }
+
   syncLayoutToNode(forceRender = true) {
     const nodeWidth = this.node?.size?.[0] || 1375;
     const targetWidth = Math.max(10, nodeWidth - 30);
@@ -4834,6 +4855,9 @@ class TimelineEditor {
       this.viewport.style.flexShrink = "0";
     }
     if (this.layoutContainer) {
+      this.layoutContainer.style.width = "100%";
+      this.layoutContainer.style.maxWidth = "100%";
+      this.layoutContainer.style.boxSizing = "border-box";
       this.layoutContainer.style.flexShrink = "0";
     }
 
@@ -8159,6 +8183,8 @@ class TimelineEditor {
       return;
     }
     if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
     const { x, y } = this.getMousePos(e);
 
     // In retake mode: block box selection — no multi-segment operations allowed
@@ -8458,6 +8484,10 @@ class TimelineEditor {
   }
 
   onMouseMove(e) {
+    if (this._isDragging || this._isSelectingBox) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     const { x: mouseX, y: mouseY } = this.getMousePos(e);
 
     if (this._isSelectingBox && this._dragType === "box_select") {
@@ -8729,6 +8759,7 @@ class TimelineEditor {
       this.audioTrackHeight = newAudioTrackHeight;
 
       this.updateSidebarHeights();
+      this.syncComfyLayoutAfterDrag({ forceRender: false });
       this.render();
       return;
     }
@@ -8757,6 +8788,7 @@ class TimelineEditor {
       this.audioTrackHeight = newAudioTrackHeight;
 
       this.updateSidebarHeights();
+      this.syncComfyLayoutAfterDrag({ forceRender: false });
       this.render();
       return;
     }
@@ -8773,14 +8805,7 @@ class TimelineEditor {
       this.resizeCanvas(this.canvas.offsetWidth);
       this.updateSidebarHeights();
       this.render();
-
-      if (this.node && this.node.computeSize) {
-        const sz = this.node.computeSize();
-        this.node.size[1] = sz[1];
-        if (window.app && window.app.graph) {
-          window.app.graph.setDirtyCanvas(true, true);
-        }
-      }
+      this.syncComfyLayoutAfterDrag({ resizeNodeHeight: true, forceRender: false, nextFrame: true });
       return;
     }
 
@@ -8789,10 +8814,7 @@ class TimelineEditor {
       const deltaX = e.clientX - this._startX;
 
       this.node.size[0] = Math.max(300, this._startNodeWidth + deltaX);
-
-      if (window.app && window.app.graph) {
-        window.app.graph.setDirtyCanvas(true, true);
-      }
+      this.syncComfyLayoutAfterDrag({ forceRender: false, nextFrame: true });
       return;
     }
 
@@ -12411,6 +12433,7 @@ app.registerExtension({
       nodeType.prototype.onResize = function (size) {
         const out = onResize?.apply(this, arguments);
         if (this._timelineEditor) {
+          this._timelineEditor.syncLayoutToNode(false);
           requestAnimationFrame(() => this._timelineEditor?.syncLayoutToNode());
         }
         return out;
