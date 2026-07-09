@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -164,3 +165,16 @@ def test_positive_crf_compresses_only_images(monkeypatch):
     assert out["guide_latents"][0] is latent
     assert gd["images"][0] is image_a
     assert gd["images"][1] is image_b
+
+
+def test_node_metadata_is_json_serializable(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+    node = ltx_director.LTXGuideDataImageCompression
+
+    json.dumps({
+        "input": node.INPUT_TYPES(),
+        "return": node.RETURN_TYPES,
+        "return_names": node.RETURN_NAMES,
+        "function": node.FUNCTION,
+        "category": node.CATEGORY,
+    })

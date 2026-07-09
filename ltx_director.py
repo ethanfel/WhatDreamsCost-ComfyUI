@@ -2550,7 +2550,9 @@ class LTXGuideDataImageCompression:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "guide_data": (GuideData,),
+                "guide_data": ("GUIDE_DATA", {
+                    "tooltip": "Director guide_data. Only image keyframes in guide_data['images'] are recompressed.",
+                }),
                 "img_compression": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -2561,7 +2563,7 @@ class LTXGuideDataImageCompression:
             },
         }
 
-    RETURN_TYPES = (GuideData,)
+    RETURN_TYPES = ("GUIDE_DATA",)
     RETURN_NAMES = ("guide_data",)
     FUNCTION = "execute"
     CATEGORY = "WhatDreamsCost"
