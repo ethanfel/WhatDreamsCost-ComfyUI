@@ -2543,6 +2543,44 @@ def _review_serve_audio(audio, key, attempt):
         return None
 
 
+class LTXGuideDataImageCompression:
+    """Pass-specific image compression for Director guide_data keyframe images."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guide_data": (GuideData,),
+                "img_compression": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 100,
+                    "step": 1,
+                    "tooltip": "H.264 CRF compression to apply to guide_data image keyframes only. 0 = no compression.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (GuideData,)
+    RETURN_NAMES = ("guide_data",)
+    FUNCTION = "execute"
+    CATEGORY = "WhatDreamsCost"
+
+    def execute(self, guide_data, img_compression=0):
+        src = guide_data or {}
+        out = dict(src)
+        for key, value in src.items():
+            if isinstance(value, list):
+                out[key] = list(value)
+
+        images = list(src.get("images", []) or [])
+        crf = max(0, min(100, int(img_compression)))
+        if crf > 0:
+            images = [_compress_image(img, crf) for img in images]
+        out["images"] = images
+        return (out,)
+
+
 class LTXReviewSeed:
     """Small seed source controlled by the LTX Review Gate frontend."""
 
