@@ -49,6 +49,7 @@ function keepFullWidth(node, container) {
 function stopMedia(ui) {
   pauseMedia(ui);
   if (ui.video) ui.video.onloadeddata = null;
+  if (ui.video) ui.video.onerror = null;
 }
 
 function pauseMedia(ui) {
@@ -91,24 +92,9 @@ function setMediaSource(el, url) {
 
 // Prefer a real <video> at the generation fps. Fall back to the base64 frame slideshow
 // only when no video was encoded. Playback itself is hover-driven by buildUI().
-function showMedia(ui, d) {
-  stopMedia(ui);
-  const fps = Math.max(1, parseFloat(d.fps) || 24);
-  ui.fps = fps;
-
-  if (d.video_url) {
-    ui.view.classList.remove("empty");
-    ui.img.style.display = "none";
-    ui.video.style.display = "block";
-    ui.video.loop = true;
-    ui.video.muted = !!d.audio_url;          // separate audio track -> keep video muted, play the audio el
-    ui.video.src = d.video_url;
-    if (ui.audio) { setMediaSource(ui.audio, d.audio_url); ui.audio.loop = true; }
-    return;
-  }
-
-  // fallback: frame slideshow at the real fps
+function showFrameFallback(ui, d, message = "") {
   ui.video.style.display = "none";
+  setMediaSource(ui.video, null);
   ui.img.style.display = "block";
   ui.frames = d.frames || [];
   if (ui.audio) { setMediaSource(ui.audio, d.audio_url); ui.audio.loop = true; }
@@ -116,6 +102,35 @@ function showMedia(ui, d) {
   ui.view.classList.remove("empty");
   ui.idx = 0;
   ui.img.src = ui.frames[0];
+  if (message) ui.status.textContent = message;
+}
+
+function showMedia(ui, d) {
+  stopMedia(ui);
+  const fps = Math.max(1, parseFloat(d.fps) || 24);
+  ui.fps = fps;
+  ui.frames = d.frames || [];
+
+  if (d.video_url) {
+    ui.view.classList.remove("empty");
+    ui.img.style.display = "none";
+    ui.video.style.display = "block";
+    ui.video.loop = true;
+    ui.video.preload = "auto";
+    ui.video.muted = !!d.audio_url;          // separate audio track -> keep video muted, play the audio el
+    if (ui.frames[0]) ui.video.poster = ui.frames[0];
+    else ui.video.removeAttribute("poster");
+    ui.video.onerror = () => {
+      console.warn("[LTXReviewGate] video failed to load, falling back to frame preview", d.video_url);
+      showFrameFallback(ui, d, "video load failed, showing frame preview");
+    };
+    setMediaSource(ui.video, d.video_url);
+    try { ui.video.load(); } catch (e) {}
+    if (ui.audio) { setMediaSource(ui.audio, d.audio_url); ui.audio.loop = true; }
+    return;
+  }
+
+  showFrameFallback(ui, d);
 }
 
 function setButtons(ui, enabled) {
@@ -145,6 +160,7 @@ async function decide(nodeId, action, ui) {
 }
 
 const UINT64_MASK = (1n << 64n) - 1n;
+const REVIEW_GATE_STATE_KEY = "ltx_review_gate";
 
 function widgetByName(node, name) {
   return node?.widgets?.find((w) => w.name === name) || null;
@@ -156,6 +172,111 @@ function nodeClassName(node) {
 
 function isReviewSeedNode(node) {
   return node?._ltxReviewSeedNode || nodeClassName(node) === "LTXReviewSeed";
+}
+
+function normalizedGateId(value) {
+  return String(value ?? "").trim().replace(/^#/, "");
+}
+
+function gateIdForNode(node) {
+  return normalizedGateId(node?.id);
+}
+
+function seedGateId(node) {
+  return normalizedGateId(widgetByName(node, "gate_id")?.value);
+}
+
+function commitCanvasChange(node) {
+  try {
+    if (app.graph?.setDirtyCanvas) app.graph.setDirtyCanvas(true, true);
+    if (app.graph?.change) app.graph.change();
+    if (node && app.graph?.onNodeChanged) app.graph.onNodeChanged(node);
+    if (app.graph?.onStateChanged) app.graph.onStateChanged();
+    const canvasEl = app.canvasEl || app.canvas?.canvas;
+    if (canvasEl && typeof PointerEvent !== "undefined") {
+      canvasEl.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
+    }
+    if (app.canvas?.checkState) app.canvas.checkState();
+    if (app.canvas?.captureCanvasState) app.canvas.captureCanvasState();
+  } catch (e) {}
+}
+
+function numericWidgetValue(widget) {
+  const value = Number(widget?.value);
+  return Number.isFinite(value) ? value : null;
+}
+
+function setWidgetValue(widget, value) {
+  if (!widget) return;
+  widget.value = value;
+  if (widget.callback) {
+    try { widget.callback(value); } catch (e) {}
+  }
+}
+
+function readReviewGateState(node) {
+  const autoPass = widgetByName(node, "auto_pass_seconds");
+  const fps = widgetByName(node, "fps");
+  const passthrough = widgetByName(node, "passthrough");
+  return {
+    auto_pass_seconds: numericWidgetValue(autoPass) ?? 0,
+    fps: numericWidgetValue(fps) ?? 24,
+    passthrough: !!passthrough?.value,
+  };
+}
+
+function applyReviewGateState(node, state) {
+  if (!state || typeof state !== "object") return false;
+  const autoPass = widgetByName(node, "auto_pass_seconds");
+  const fps = widgetByName(node, "fps");
+  const passthrough = widgetByName(node, "passthrough");
+  if (!autoPass || !fps) return;
+
+  if (state.auto_pass_seconds !== undefined) {
+    setWidgetValue(autoPass, Number(state.auto_pass_seconds) || 0);
+  }
+  if (state.fps !== undefined) {
+    const value = Number(state.fps);
+    setWidgetValue(fps, Number.isFinite(value) && value >= 1 ? value : 24);
+  }
+  if (passthrough && state.passthrough !== undefined) {
+    setWidgetValue(passthrough, !!state.passthrough);
+  }
+  return true;
+}
+
+function persistReviewGateState(node, info) {
+  if (!info) return;
+  const state = readReviewGateState(node);
+  node.properties = node.properties || {};
+  node.properties[REVIEW_GATE_STATE_KEY] = state;
+  info.properties = { ...(info.properties || {}), [REVIEW_GATE_STATE_KEY]: state };
+  info.widgets_values = [state.auto_pass_seconds, state.fps, state.passthrough];
+}
+
+function migrateReviewGateWidgets(node, info) {
+  const savedState = info?.properties?.[REVIEW_GATE_STATE_KEY];
+  if (applyReviewGateState(node, savedState)) return;
+
+  const autoPass = widgetByName(node, "auto_pass_seconds");
+  const fps = widgetByName(node, "fps");
+  if (!autoPass || !fps) return;
+
+  const autoValue = numericWidgetValue(autoPass);
+  const fpsValue = numericWidgetValue(fps);
+  if (fpsValue !== null && fpsValue >= 1) return;
+  if (autoValue === null || autoValue < 1 || autoValue > 120) {
+    setWidgetValue(fps, 24);
+    return;
+  }
+
+  // Legacy workflows can deserialize a previous widget order as:
+  // auto_pass_seconds=<fps>, fps=0. Repair that common broken state on load.
+  setWidgetValue(autoPass, 0);
+  setWidgetValue(fps, autoValue);
+  console.info(
+    `[LTXReviewGate] migrated widget values: auto_pass_seconds=0, fps=${autoValue}`,
+  );
 }
 
 function nextSeedValue(value) {
@@ -172,13 +293,17 @@ function nextSeedValue(value) {
 function findControlledSeedNode(gateNode) {
   const nodes = app.graph?._nodes || [];
   const seeds = nodes.filter(isReviewSeedNode);
-  const gateId = String(gateNode?.id ?? "");
-  const matching = seeds.filter((node) => String(widgetByName(node, "gate_id")?.value || "").trim() === gateId);
+  const gateId = gateIdForNode(gateNode);
+  const matching = gateId ? seeds.filter((node) => seedGateId(node) === gateId) : [];
   if (matching.length === 1) return { node: matching[0], reason: "" };
   if (matching.length > 1) return { node: null, reason: "multiple seed nodes match this gate_id" };
-  if (seeds.length === 1) return { node: seeds[0], reason: "" };
   if (seeds.length === 0) return { node: null, reason: "no LTX Review Seed node found" };
-  return { node: null, reason: "set gate_id on one LTX Review Seed" };
+  if (seeds.length === 1) {
+    const staleId = seedGateId(seeds[0]);
+    if (!staleId) return { node: seeds[0], reason: "" };
+    return { node: null, reason: `gate_id ${staleId} does not match gate ${gateId || "?"}` };
+  }
+  return { node: null, reason: `set gate_id to ${gateId || "this gate id"} on one LTX Review Seed` };
 }
 
 function incrementControlledSeed(gateNode, ui) {
@@ -197,8 +322,7 @@ function incrementControlledSeed(gateNode, ui) {
   if (seedWidget.callback) {
     try { seedWidget.callback(next); } catch (e) {}
   }
-  if (app.graph?.setDirtyCanvas) app.graph.setDirtyCanvas(true, true);
-  if (app.graph?.change) app.graph.change();
+  commitCanvasChange(node);
   if (ui) ui.status.textContent = `seed -> ${next}`;
   return true;
 }
@@ -277,6 +401,18 @@ app.registerExtension({
       return;
     }
     if (nodeData.name !== "LTXReviewGate") return;
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+      const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      migrateReviewGateWidgets(this, info);
+      return r;
+    };
+    const onSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (info) {
+      const r = onSerialize ? onSerialize.apply(this, arguments) : undefined;
+      persistReviewGateState(this, info);
+      return r;
+    };
     const onCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onCreated ? onCreated.apply(this, arguments) : undefined;

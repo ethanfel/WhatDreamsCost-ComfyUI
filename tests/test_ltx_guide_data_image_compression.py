@@ -238,6 +238,17 @@ def test_strength_override_multiply_by_keyframe_order(monkeypatch):
     assert gd["strengths"] == [1.0, 0.5]
 
 
+def test_review_temp_names_include_preview_id(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+
+    first = ltx_director._review_temp_name("node/42", 0, 1, "mp4")
+    second = ltx_director._review_temp_name("node/42", 0, 2, "mp4")
+
+    assert first != second
+    assert first == "ltx_review_node_42_0_1.mp4"
+    assert second == "ltx_review_node_42_0_2.mp4"
+
+
 def test_node_metadata_is_json_serializable(monkeypatch):
     ltx_director = _load_ltx_director(monkeypatch)
     for name in [

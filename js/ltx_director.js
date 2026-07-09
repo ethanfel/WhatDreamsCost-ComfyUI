@@ -11169,112 +11169,49 @@ class TimelineEditor {
     try {
       const data = JSON.parse(jsonStr);
 
-      // Load settings if present
-      if (data.global_prompt !== undefined) {
-        if (data.retake_global_prompt !== undefined) {
-          this.timeline.global_prompt = data.global_prompt;
-          this.timeline.retake_global_prompt = data.retake_global_prompt;
-        } else {
-          this.syncGlobalPrompt(data.global_prompt);
-        }
-      }
-      if (data.settings) {
-        for (const [key, value] of Object.entries(data.settings)) {
-          // Handle legacy keys for backward compatibility
-          if (key === "startFrames" && this.startFramesWidget) {
-            this.startFramesWidget.value = value;
-            if (this.startFramesWidget.callback) this.startFramesWidget.callback(value);
-            continue;
-          }
-          if (key === "durationFrames" && this.durationFramesWidget) {
-            this.durationFramesWidget.value = value;
-            if (this.durationFramesWidget.callback) this.durationFramesWidget.callback(value);
-            continue;
-          }
-          if (key === "frameRate" && this.frameRateWidget) {
-            this.frameRateWidget.value = value;
-            if (this.frameRateWidget.callback) this.frameRateWidget.callback(value);
-            continue;
-          }
+      // A saved timeline file holds ONE timeline (data.timeline) plus flat settings.
+      // Import it as a NEW tab and switch to it — never discard the tabs already open.
+      // (The tab-bar "⬇ JSON" import already behaves this way; this keeps Load consistent.)
+      this._captureActiveLength();
+      this.commitChanges(); // persist the current active tab first so loading loses nothing
 
-          const w = this.node.widgets?.find(x => x.name === key);
-          if (w) {
-            w.value = value;
-            if (w.callback) w.callback(w.value);
-          }
-        }
+      const tlBlob = (data && data.timeline) ? data.timeline : (data || {});
+      const settings = (data && data.settings) || {};
+
+      // Global prompts may live at the top level of the file; fold them into the tab blob.
+      if (data.global_prompt !== undefined && tlBlob.global_prompt === undefined) {
+        tlBlob.global_prompt = data.global_prompt;
+      }
+      if (data.retake_global_prompt !== undefined && tlBlob.retake_global_prompt === undefined) {
+        tlBlob.retake_global_prompt = data.retake_global_prompt;
       }
 
-      if (this.timelineDataWidget) this.timelineDataWidget.value = JSON.stringify(data.timeline || data);
-      const _loadedTabs = parseTabsRoot(this.timelineDataWidget.value);
-      this.tabs = _loadedTabs.tabs;
-      this.activeTabIndex = _loadedTabs.activeTab;
-      this.timeline = this.tabs[this.activeTabIndex];
-      this.dualViewEnabled = _loadedTabs.dualView === true;
-      this.resultTabId = _loadedTabs.resultTabId || null;
-      this.resultRange = null;
+      const newTab = parseInitial(JSON.stringify(tlBlob));
+
+      // Per-tab frame rate / window: prefer the timeline blob, fall back to legacy `settings`.
+      let fr = Number(tlBlob.frameRate);
+      if (!(fr > 0)) fr = Number(settings.frameRate);
+      if (!(fr > 0)) fr = this.getFrameRate();
+      newTab.frameRate = fr;
+      if (tlBlob.normalStartFrame === undefined && settings.startFrames !== undefined) {
+        newTab.normalStartFrame = settings.startFrames;
+      }
+      if (tlBlob.normalDurationFrames === undefined && settings.durationFrames !== undefined) {
+        newTab.normalDurationFrames = settings.durationFrames;
+      }
+
+      // Name the tab after the loaded file when we can.
+      const fname = (fileHandle && fileHandle.name) ? String(fileHandle.name) : "";
+      newTab.name = fname ? fname.replace(/\.json$/i, "") : "Loaded";
+      newTab._tabId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+
+      this.tabs.push(newTab);
+      this.currentFileHandle = fileHandle;
+      // switchToTab activates the new tab and hydrates tracks/media/widgets, commits and renders.
+      this.switchToTab(this.tabs.length - 1);
       if (this.renderTabBar) this.renderTabBar();
       if (this.renderResultLane) this.renderResultLane();
-      this.mainTrackEnabled = this.timeline.mainTrackEnabled !== false;
-      this.audioTrackEnabled = this.timeline.audioTrackEnabled !== false;
-      this.motionTrackEnabled = this.timeline.motionTrackEnabled !== false;
-      if (this.timeline.showFilenames !== undefined) {
-        this.node.properties.showFilenames = this.timeline.showFilenames;
-      }
-      if (this.timeline.overrideAudio !== undefined) {
-        this.node.properties.overrideAudio = this.timeline.overrideAudio;
-      }
-      if (this.timeline.inpaint_audio !== undefined) {
-        this.node.properties.inpaint_audio = this.timeline.inpaint_audio;
-      }
-      if (this.timeline.propHeight !== undefined) {
-        this.node.properties.propHeight = this.timeline.propHeight;
-        this.propHeight = this.timeline.propHeight;
-        if (this.propContainer) {
-          this.propContainer.style.height = `${this.propHeight}px`;
-        }
-      }
-      if (this.timeline.globalPropHeight !== undefined) {
-        this.node.properties.globalPropHeight = this.timeline.globalPropHeight;
-        this.globalPropHeight = this.timeline.globalPropHeight;
-        if (this.globalPropContainer) {
-          this.globalPropContainer.style.height = `${this.globalPropHeight}px`;
-        }
-      }
-      this.currentFileHandle = fileHandle;
-      this.retakeMode = this.timeline.retakeMode === true;
 
-      this.loadMedia();
-
-      if (!this.retakeMode) {
-        this._suppressCommit = true;
-        if (this.timeline.normalStartFrame !== undefined && this.startFramesWidget) {
-          this.startFramesWidget.value = this.timeline.normalStartFrame;
-          if (this.startFramesWidget.callback) {
-            try { this.startFramesWidget.callback(this.timeline.normalStartFrame); } catch (_) {}
-          }
-        }
-        if (this.timeline.normalDurationFrames !== undefined && this.durationFramesWidget) {
-          this.durationFramesWidget.value = this.timeline.normalDurationFrames;
-          if (this.durationFramesWidget.callback) {
-            try { this.durationFramesWidget.callback(this.timeline.normalDurationFrames); } catch (_) {}
-          }
-        }
-        this._suppressCommit = false;
-      }
-
-      this.updateRetakeUIState();
-      this.updateUIFromSelection();
-      this.syncWidgetsAndUI();
-      this.commitChanges(true); // forces sync to UI and other widgets
-
-
-      if (this.updateInpaintToggleStyle) {
-        const inpaintWidget = this.node.widgets?.find(w => w.name === "inpaint_audio");
-        if (inpaintWidget) this.updateInpaintToggleStyle(inpaintWidget.value);
-      }
-
-      this.render();
       this.dismissSettingsMenu();
 
       // Trigger ComfyUI's change-detection pipeline the same way a real user

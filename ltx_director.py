@@ -3,6 +3,7 @@ import asyncio
 import json
 import base64
 import io as _io
+import itertools
 import math
 import threading
 
@@ -2412,6 +2413,7 @@ class LTXExtendCollect:
 # --- LTX Review Gate: human-in-the-loop pass / reroll / reload for the extend retry loop ---
 _review_events = {}    # node_id -> threading.Event
 _review_actions = {}   # node_id -> "pass" | "reroll" | "reload"
+_review_preview_counter = itertools.count(1)
 
 
 @PromptServer.instance.routes.post("/ltx_review_decide")
@@ -2452,12 +2454,12 @@ def _review_preview_frames(images, max_frames=16, quality=70):
     return out
 
 
-def _review_temp_name(key, attempt, ext):
+def _review_temp_name(key, attempt, preview_id, ext):
     safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(key))
-    return f"ltx_review_{safe}_{int(attempt)}.{ext}"
+    return f"ltx_review_{safe}_{int(attempt)}_{int(preview_id)}.{ext}"
 
 
-def _review_encode_one(images, audio, fps, key, attempt, with_audio):
+def _review_encode_one(images, audio, fps, key, attempt, preview_id, with_audio):
     """One mp4 encode attempt: frames at fps, optionally MUXING the audio window into the same file so
     video+audio are a single synced stream (scrubs together, no drift). Returns the /view URL."""
     n = int(images.shape[0]); H = int(images.shape[1]); W = int(images.shape[2])
@@ -2466,7 +2468,7 @@ def _review_encode_one(images, audio, fps, key, attempt, with_audio):
     W2 = W - (W % 2); H2 = H - (H % 2)  # yuv420p needs even dims
     fps_i = max(1, int(round(float(fps) or 24)))
     tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
-    fname = _review_temp_name(key, attempt, "mp4")
+    fname = _review_temp_name(key, attempt, preview_id, "mp4")
     container = av.open(os.path.join(tmp, fname), mode="w")
     try:
         vs = container.add_stream("libx264", rate=fps_i)
@@ -2501,10 +2503,10 @@ def _review_encode_one(images, audio, fps, key, attempt, with_audio):
                 container.mux(pkt)
     finally:
         container.close()
-    return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+    return f"/view?filename={fname}&type=temp&t={int(preview_id)}"
 
 
-def _review_encode_video(images, audio, fps, key, attempt):
+def _review_encode_video(images, audio, fps, key, attempt, preview_id):
     """Encode a temp mp4 at fps, muxing the audio in so it's ONE synced file. Returns (url, has_audio):
     tries video+audio first, falls back to video-only, then None (JS uses the frame slideshow)."""
     if PromptServer is None or folder_paths is None or not hasattr(images, "shape"):
@@ -2512,17 +2514,17 @@ def _review_encode_video(images, audio, fps, key, attempt):
     has_audio = isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor)
     if has_audio:
         try:
-            return _review_encode_one(images, audio, fps, key, attempt, True), True
+            return _review_encode_one(images, audio, fps, key, attempt, preview_id, True), True
         except Exception as e:
             log.info("[LTXReviewGate] muxed encode failed (%s) — trying video-only.", e)
     try:
-        return _review_encode_one(images, None, fps, key, attempt, False), False
+        return _review_encode_one(images, None, fps, key, attempt, preview_id, False), False
     except Exception as e:
         log.info("[LTXReviewGate] video encode failed (%s) — using frame slideshow.", e)
         return None, False
 
 
-def _review_serve_audio(audio, key, attempt):
+def _review_serve_audio(audio, key, attempt, preview_id):
     """Save this pass's audio window to a temp WAV -> /view URL, played alongside the preview video."""
     if PromptServer is None or folder_paths is None:
         return None
@@ -2535,9 +2537,9 @@ def _review_serve_audio(audio, key, attempt):
             wf = wf[0]
         sr = int(audio.get("sample_rate", 44100))
         tmp = folder_paths.get_temp_directory(); os.makedirs(tmp, exist_ok=True)
-        fname = _review_temp_name(key, attempt, "wav")
+        fname = _review_temp_name(key, attempt, preview_id, "wav")
         torchaudio.save(os.path.join(tmp, fname), wf.cpu().float().clamp(-1, 1), sr)
-        return f"/view?filename={fname}&type=temp&t={int(attempt)}"
+        return f"/view?filename={fname}&type=temp&t={int(preview_id)}"
     except Exception as e:
         log.info("[LTXReviewGate] audio preview unavailable (%s)", e)
         return None
@@ -2750,17 +2752,27 @@ class LTXGuideDataStrengthOverride:
         out = _copy_guide_data(src)
         count = len(_guide_images(src))
         if count <= 0:
+            log.info("[LTXGuideDataStrengthOverride] no image keyframes; unchanged")
             return (out,)
 
         current = list(src.get("strengths", []) or [])
         while len(current) < count:
             current.append(1.0)
         current = [float(x) for x in current[:count]]
+        before = list(current)
         values = _parse_strength_values(strengths)
         multiply = str(mode or "replace").lower() == "multiply"
         for idx, val in enumerate(values[:count]):
             current[idx] = current[idx] * float(val) if multiply else float(val)
         out["strengths"] = current
+        log.info(
+            "[LTXGuideDataStrengthOverride] mode=%s values=%s count=%d strengths=%s -> %s",
+            "multiply" if multiply else "replace",
+            values[:count],
+            count,
+            before,
+            current,
+        )
         return (out,)
 
 
@@ -2841,12 +2853,14 @@ class LTXReviewGate:
 
         # Always push the preview to the node. The mp4 muxes the audio in (one synced <video>); a
         # separate audio_url is only sent when the audio ISN'T in the video (video-only or slideshow).
-        video_url, video_has_audio = _review_encode_video(images, audio, fps, key, attempt)
-        audio_url = None if (video_url and video_has_audio) else _review_serve_audio(audio, key, attempt)
-        frames = [] if video_url else _review_preview_frames(images)  # frames only as a fallback
+        preview_id = next(_review_preview_counter)
+        video_url, video_has_audio = _review_encode_video(images, audio, fps, key, attempt, preview_id)
+        audio_url = None if (video_url and video_has_audio) else _review_serve_audio(audio, key, attempt, preview_id)
+        frames = _review_preview_frames(images, max_frames=1 if video_url else 16)
         try:
             PromptServer.instance.send_sync("ltx_review_show",
                                             {"node_id": key, "frames": frames, "attempt": int(attempt),
+                                             "preview_id": int(preview_id),
                                              "fps": float(fps) if fps else 24.0,
                                              "video_url": video_url, "audio_url": audio_url,
                                              "passthrough": bool(passthrough)})
