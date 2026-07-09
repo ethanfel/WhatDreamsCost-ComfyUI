@@ -2543,6 +2543,57 @@ def _review_serve_audio(audio, key, attempt):
         return None
 
 
+def _copy_guide_data(guide_data):
+    src = guide_data or {}
+    out = dict(src)
+    for key, value in src.items():
+        if isinstance(value, list):
+            out[key] = list(value)
+    return out
+
+
+def _guide_images(src):
+    return list((src or {}).get("images", []) or [])
+
+
+def _resize_guide_image_roundtrip(image, scale, method):
+    if not isinstance(image, torch.Tensor) or image.ndim != 4:
+        return image
+    n, h, w, c = image.shape
+    if n <= 0 or h <= 0 or w <= 0 or c < 1:
+        return image
+    s = max(0.01, min(1.0, float(scale)))
+    if s >= 0.999:
+        return image
+
+    down_h = max(1, int(round(h * s)))
+    down_w = max(1, int(round(w * s)))
+    mode = str(method or "bilinear")
+    if mode not in ("nearest", "bilinear", "bicubic", "area"):
+        mode = "bilinear"
+
+    nchw = image.permute(0, 3, 1, 2)
+    kwargs = {}
+    if mode in ("bilinear", "bicubic"):
+        kwargs["align_corners"] = False
+    down = F.interpolate(nchw, size=(down_h, down_w), mode=mode, **kwargs)
+    up = F.interpolate(down, size=(h, w), mode=mode, **kwargs)
+    return up.permute(0, 2, 3, 1).clamp(0.0, 1.0)
+
+
+def _parse_strength_values(value):
+    vals = []
+    for raw in str(value or "").replace("\n", ",").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            vals.append(float(raw))
+        except Exception:
+            continue
+    return vals
+
+
 class LTXGuideDataImageCompression:
     """Pass-specific image compression for Director guide_data keyframe images."""
 
@@ -2570,16 +2621,146 @@ class LTXGuideDataImageCompression:
 
     def execute(self, guide_data, img_compression=0):
         src = guide_data or {}
-        out = dict(src)
-        for key, value in src.items():
-            if isinstance(value, list):
-                out[key] = list(value)
-
-        images = list(src.get("images", []) or [])
+        out = _copy_guide_data(src)
+        images = _guide_images(src)
         crf = max(0, min(100, int(img_compression)))
         if crf > 0:
             images = [_compress_image(img, crf) for img in images]
         out["images"] = images
+        return (out,)
+
+
+class LTXGuideDataImageResampleDegrade:
+    """Downscale/upscale Director guide_data image keyframes to loosen exact image guidance."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guide_data": ("GUIDE_DATA", {
+                    "tooltip": "Director guide_data. Only image keyframes in guide_data['images'] are resampled.",
+                }),
+                "scale": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.01,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Downscale factor before upscaling back to the original size. 1.0 = no change.",
+                }),
+                "method": (["nearest", "bilinear", "bicubic", "area"], {
+                    "default": "bilinear",
+                    "tooltip": "Interpolation method used for the downscale/upscale round trip.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("GUIDE_DATA",)
+    RETURN_NAMES = ("guide_data",)
+    FUNCTION = "execute"
+    CATEGORY = "WhatDreamsCost"
+
+    def execute(self, guide_data, scale=0.5, method="bilinear"):
+        src = guide_data or {}
+        out = _copy_guide_data(src)
+        out["images"] = [_resize_guide_image_roundtrip(img, scale, method) for img in _guide_images(src)]
+        return (out,)
+
+
+class LTXGuideDataImageNoise:
+    """Deterministic image-space noise for Director guide_data image keyframes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guide_data": ("GUIDE_DATA", {
+                    "tooltip": "Director guide_data. Only image keyframes in guide_data['images'] receive noise.",
+                }),
+                "amount": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.001,
+                    "tooltip": "Image-space noise amount. 0 = no change.",
+                }),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "step": 1,
+                    "tooltip": "Seed for deterministic image noise.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("GUIDE_DATA",)
+    RETURN_NAMES = ("guide_data",)
+    FUNCTION = "execute"
+    CATEGORY = "WhatDreamsCost"
+
+    def execute(self, guide_data, amount=0.0, seed=0):
+        src = guide_data or {}
+        out = _copy_guide_data(src)
+        amt = max(0.0, float(amount))
+        if amt <= 0.0:
+            out["images"] = _guide_images(src)
+            return (out,)
+
+        noisy = []
+        for idx, img in enumerate(_guide_images(src)):
+            if not isinstance(img, torch.Tensor):
+                noisy.append(img)
+                continue
+            gen = torch.Generator(device="cpu").manual_seed((int(seed) + idx) & 0xffffffffffffffff)
+            noise = torch.randn(img.shape, generator=gen, dtype=torch.float32).to(device=img.device, dtype=img.dtype)
+            noisy.append((img + noise * amt).clamp(0.0, 1.0))
+        out["images"] = noisy
+        return (out,)
+
+
+class LTXGuideDataStrengthOverride:
+    """Replace or multiply Director guide_data keyframe strengths by keyframe order."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guide_data": ("GUIDE_DATA", {
+                    "tooltip": "Director guide_data. Only guide_data['strengths'] is changed.",
+                }),
+                "strengths": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "Comma-separated keyframe strengths by image-keyframe order, e.g. 0.75,1.0,0.6.",
+                }),
+                "mode": (["replace", "multiply"], {
+                    "default": "replace",
+                    "tooltip": "replace = set listed strengths; multiply = multiply existing strengths by listed values.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("GUIDE_DATA",)
+    RETURN_NAMES = ("guide_data",)
+    FUNCTION = "execute"
+    CATEGORY = "WhatDreamsCost"
+
+    def execute(self, guide_data, strengths="", mode="replace"):
+        src = guide_data or {}
+        out = _copy_guide_data(src)
+        count = len(_guide_images(src))
+        if count <= 0:
+            return (out,)
+
+        current = list(src.get("strengths", []) or [])
+        while len(current) < count:
+            current.append(1.0)
+        current = [float(x) for x in current[:count]]
+        values = _parse_strength_values(strengths)
+        multiply = str(mode or "replace").lower() == "multiply"
+        for idx, val in enumerate(values[:count]):
+            current[idx] = current[idx] * float(val) if multiply else float(val)
+        out["strengths"] = current
         return (out,)
 
 

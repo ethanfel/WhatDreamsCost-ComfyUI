@@ -128,6 +128,17 @@ def _guide_data():
     }, image_a, image_b, original, latent
 
 
+def _pattern_image():
+    vals = torch.tensor(
+        [[0.0, 1.0, 0.0, 1.0],
+         [1.0, 0.0, 1.0, 0.0],
+         [0.0, 1.0, 0.0, 1.0],
+         [1.0, 0.0, 1.0, 0.0]],
+        dtype=torch.float32,
+    )
+    return vals.reshape(1, 4, 4, 1).repeat(1, 1, 1, 3)
+
+
 def test_crf_zero_preserves_image_values_and_latents(monkeypatch):
     ltx_director = _load_ltx_director(monkeypatch)
     gd, image_a, image_b, original, latent = _guide_data()
@@ -167,14 +178,79 @@ def test_positive_crf_compresses_only_images(monkeypatch):
     assert gd["images"][1] is image_b
 
 
+def test_resample_degrade_changes_images_only(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+    gd, _image_a, _image_b, original, latent = _guide_data()
+    pattern = _pattern_image()
+    gd["images"] = [pattern]
+
+    (out,) = ltx_director.LTXGuideDataImageResampleDegrade().execute(gd, scale=0.5, method="bilinear")
+
+    assert out is not gd
+    assert out["images"] is not gd["images"]
+    assert out["images"][0].shape == pattern.shape
+    assert not torch.equal(out["images"][0], pattern)
+    assert torch.equal(gd["images"][0], pattern)
+    assert out["original_images"][0] is original
+    assert out["guide_latents"][0] is latent
+
+
+def test_noise_degrade_is_seeded_and_changes_images_only(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+    gd, _image_a, _image_b, original, latent = _guide_data()
+    base = torch.full((1, 4, 4, 3), 0.5, dtype=torch.float32)
+    gd["images"] = [base]
+
+    node = ltx_director.LTXGuideDataImageNoise()
+    (out_a,) = node.execute(gd, amount=0.05, seed=123)
+    (out_b,) = node.execute(gd, amount=0.05, seed=123)
+    (out_c,) = node.execute(gd, amount=0.05, seed=124)
+
+    assert torch.equal(out_a["images"][0], out_b["images"][0])
+    assert not torch.equal(out_a["images"][0], out_c["images"][0])
+    assert not torch.equal(out_a["images"][0], base)
+    assert out_a["original_images"][0] is original
+    assert out_a["guide_latents"][0] is latent
+
+
+def test_strength_override_replace_by_keyframe_order(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+    gd, *_ = _guide_data()
+
+    (out,) = ltx_director.LTXGuideDataStrengthOverride().execute(
+        gd, strengths="0.75, 1.0, 0.25", mode="replace",
+    )
+
+    assert out["strengths"] == [0.75, 1.0]
+    assert out["images"] == gd["images"]
+    assert out["guide_latents"] == gd["guide_latents"]
+
+
+def test_strength_override_multiply_by_keyframe_order(monkeypatch):
+    ltx_director = _load_ltx_director(monkeypatch)
+    gd, *_ = _guide_data()
+
+    (out,) = ltx_director.LTXGuideDataStrengthOverride().execute(
+        gd, strengths="0.5", mode="multiply",
+    )
+
+    assert out["strengths"] == [0.5, 0.5]
+    assert gd["strengths"] == [1.0, 0.5]
+
+
 def test_node_metadata_is_json_serializable(monkeypatch):
     ltx_director = _load_ltx_director(monkeypatch)
-    node = ltx_director.LTXGuideDataImageCompression
-
-    json.dumps({
-        "input": node.INPUT_TYPES(),
-        "return": node.RETURN_TYPES,
-        "return_names": node.RETURN_NAMES,
-        "function": node.FUNCTION,
-        "category": node.CATEGORY,
-    })
+    for name in [
+        "LTXGuideDataImageCompression",
+        "LTXGuideDataImageResampleDegrade",
+        "LTXGuideDataImageNoise",
+        "LTXGuideDataStrengthOverride",
+    ]:
+        node = getattr(ltx_director, name)
+        json.dumps({
+            "input": node.INPUT_TYPES(),
+            "return": node.RETURN_TYPES,
+            "return_names": node.RETURN_NAMES,
+            "function": node.FUNCTION,
+            "category": node.CATEGORY,
+        })

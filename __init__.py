@@ -4,7 +4,7 @@ from .ltx_sequencer import LTXSequencer
 from .speech_length_calculator import SpeechLengthCalculator
 from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
-from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect, LTXReviewGate, LTXReviewSeed, LTXGuideDataImageCompression
+from .ltx_director import LTXDirector, LTXKeyframeOut, LTXAutoExtend, LTXExtendInit, LTXExtendStep, LTXExtendCollect, LTXReviewGate, LTXReviewSeed, LTXGuideDataImageCompression, LTXGuideDataImageResampleDegrade, LTXGuideDataImageNoise, LTXGuideDataStrengthOverride
 from .ltx_extend_loop import LOOP_NODE_CLASS_MAPPINGS, LOOP_NODE_DISPLAY_NAME_MAPPINGS
 from .ltx_extend_studio import STUDIO_NODE_CLASS_MAPPINGS, STUDIO_NODE_DISPLAY_NAME_MAPPINGS
 from .ltx_director_guide import LTXDirectorGuide, LTXDirectorCropGuides, LTXICLoraSelector
@@ -40,6 +40,9 @@ NODE_CLASS_MAPPINGS = {
     "LTXReviewGate": LTXReviewGate,
     "LTXReviewSeed": LTXReviewSeed,
     "LTXGuideDataImageCompression": LTXGuideDataImageCompression,
+    "LTXGuideDataImageResampleDegrade": LTXGuideDataImageResampleDegrade,
+    "LTXGuideDataImageNoise": LTXGuideDataImageNoise,
+    "LTXGuideDataStrengthOverride": LTXGuideDataStrengthOverride,
     "LTXDirectorGuide": LTXDirectorGuide,
     "LTXDirectorCropGuides": LTXDirectorCropGuides,
     "LTXICLoraSelector": LTXICLoraSelector,
@@ -63,6 +66,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LTXReviewGate": "LTX Review Gate",
     "LTXReviewSeed": "LTX Review Seed",
     "LTXGuideDataImageCompression": "LTX Guide Data Image Compression",
+    "LTXGuideDataImageResampleDegrade": "LTX Guide Data Image Resample Degrade",
+    "LTXGuideDataImageNoise": "LTX Guide Data Image Noise",
+    "LTXGuideDataStrengthOverride": "LTX Guide Data Strength Override",
     "LTXDirectorGuide": "LTX Director Guide",
     "LTXDirectorCropGuides": "LTX Director Crop Guides",
     "LTXICLoraSelector": "LTX IC-LoRA Selector",
