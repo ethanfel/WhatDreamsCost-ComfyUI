@@ -1,6 +1,7 @@
 import logging
 import types
 import sys
+import inspect
 
 import comfy.ldm.modules.attention
 
@@ -9,11 +10,14 @@ log = logging.getLogger(__name__)
 
 def get_current_node_id() -> str:
     """Walk up the CPython stack frames to find ComfyUI's unique_id of the currently executing node."""
-    frame = sys._getframe()
-    while frame:
-        if "unique_id" in frame.f_locals:
-            return str(frame.f_locals["unique_id"])
-        frame = frame.f_back
+    try:
+        frame = inspect.currentframe()
+        while frame:
+            if "unique_id" in frame.f_locals:
+                return str(frame.f_locals["unique_id"])
+            frame = frame.f_back
+    except Exception:
+        pass
     return "default_relay"
 
 
