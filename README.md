@@ -35,7 +35,7 @@ Also if you want to support this project or my channel, I did make a Ko-fi due t
 
 **❗❗IMPORTANT❗❗**
 
-If you don't see the latest version (v1.3.9) yet in the manager then just download the nightly version (or fetch the updates to update the list to see the latest version). 
+If you don't see the latest version (v2.0.0) yet in the manager then just download the nightly version (or fetch the updates to update the list to see the latest version). 
 Also you will need to update ComfyUI-LTXVideo and ComfyUI-KJNodes to the latest version as well. You cannot use this node without updating ComfyUI-LTXVideo!
 
 # 🔄 Recent Updates
